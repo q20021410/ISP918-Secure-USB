@@ -1,0 +1,17 @@
+# Rust build artifacts
+rust_secure_usb/target/
+**/target/
+
+# Legacy C# backup folder
+backup_csharp/
+
+# Temporary / Preload data
+preload_lun1/
+*.tmp
+*.bak
+*.log
+
+# Local vault cache
+vault_*.cfg
+ui_prefs.cfg
+.is918_vault.cfg

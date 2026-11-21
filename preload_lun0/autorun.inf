@@ -1,0 +1,5 @@
+[autorun]
+icon=logo.ico
+label=SECURE_USB
+open=SecureUSBManager.exe
+action=Secure USB Manager
