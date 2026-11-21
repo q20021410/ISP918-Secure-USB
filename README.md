@@ -1,18 +1,24 @@
-# 🛡️ Secure USB Vault Manager (Pure Rust Win32 Edition)
+# 🛡️ Secure USB Vault Manager (`IS918` Pure Rust Win32 Edition)
 
 ![Platform](https://img.shields.io/badge/Platform-Windows%207%20%7C%2010%20%7C%2011-0078D4?style=flat-square&logo=windows)
 ![Language](https://img.shields.io/badge/Language-Rust%20(2021%20Edition)-DEA584?style=flat-square&logo=rust)
 ![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External%20Crates-10B981?style=flat-square)
-![Binary Size](https://img.shields.io/badge/Binary%20Size-~345%20KB-3B82F6?style=flat-square)
+![Binary Size](https://img.shields.io/badge/Binary%20Size-~360%20KB-3B82F6?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-F59E0B?style=flat-square)
 
-**Secure USB Vault Manager**(`SecureUSBManager.exe`)는 **Innostor `IS918` 시리즈(`IS918M_GA` 등) USB 컨트롤러**의 하드웨어 보안 파티션(Dual-LUN: `CD-ROM + Security`)을 제어하는 초경량 네이티브 보안 런처 및 볼트 관리 프로그램입니다.
-
-기존 제조사 번들 프로그램(`IS918SecurityPack.exe`)의 투박한 UI, 다국어 글자 깨짐, 재포맷 없이는 비밀번호 변경이 불가능했던 한계를 해결하기 위해 **외부 크레이트 의존성 없이(`Zero External Dependencies`) 순수 Rust 표준 라이브러리와 Win32 GDI / SCSI Pass-Through FFI만으로 제작**되었습니다.
+> **[ 🇰🇷 한국어 안내](#-한국어-안내-korean) | [ 🇺🇸 English Documentation](#-english-documentation)**
 
 <p align="center">
   <img src="./preview.png" alt="Secure USB Vault Manager Preview" width="700" />
 </p>
+
+---
+
+# 🇰🇷 한국어 안내 (Korean)
+
+**Secure USB Vault Manager**(`SecureUSBManager.exe`)는 **Innostor `IS918` 시리즈(`IS918M_GA` 등) USB 컨트롤러**의 하드웨어 보안 파티션(Dual-LUN: `CD-ROM + Security`)을 제어하는 초경량 네이티브 보안 런처 및 볼트 관리 프로그램입니다.
+
+기존 제조사 번들 프로그램(`IS918SecurityPack.exe`)의 투박한 UI, 다국어 글자 깨짐, 재포맷 없이는 비밀번호 변경이 불가능했던 한계를 해결하기 위해 **외부 크레이트 의존성 없이(`Zero External Dependencies`) 순수 Rust 표준 라이브러리와 Win32 GDI / SCSI Pass-Through FFI만으로 제작**되었습니다.
 
 ---
 
@@ -46,107 +52,169 @@
 ### 6. 🌓 라이트 / 다크 모드 & 🌐 3개 국어(KO / EN / JA) 완벽 지원
 - **라이트 / 다크 모드**: Windows 시스템 테마를 자동 감지하며, 상단 **`☀️ 라이트` / `🌙 다크`** 버튼으로 타이틀 바(`DwmSetWindowAttribute`)부터 캔버스·입력창·버튼까지 즉시 전환됩니다.
 - **다국어 지원**: **한국어(`한국어`) · 영어(`English`) · 일본어(`日本語`)** 실시간 전환 및 GDI 벡터 그래픽으로 직접 렌더링한 국기 아이콘(태극기 / 성조기 / 일장기)을 제공합니다.
-- **High-DPI (`PerMonitorV2`) & 더블 버퍼링**: 4K/고해상도 모니터에서도 글자 깨짐이나 깜빡임이 없으며, 약 **`345 KB` 단일 네이티브 실행 파일**로 `.NET`이나 `VC++ 재배포 패키지` 설치 없이 모든 Windows PC에서 즉시 실행됩니다.
+- **High-DPI (`PerMonitorV2`) & 더블 버퍼링**: 4K/고해상도 모니터에서도 글자 깨짐이나 깜빡임이 없으며, 약 **`360 KB` 단일 네이티브 실행 파일**로 `.NET`이나 `VC++ 재배포 패키지` 설치 없이 모든 Windows PC에서 즉시 실행됩니다.
 
 ---
 
-## 🖥️ UI 및 파티션 구조 (Dual-LUN Architecture)
+## 🛠️ Innostor IS918 MPTool 다운로드 및 하드웨어 보안 파티션 제작 가이드
 
-USB는 컨트롤러 레벨에서 다음과 같이 2개의 독립 LUN으로 분할되어 동작합니다:
+일반 IS918 컨트롤러 USB를 하드웨어 보안 USB(`CD-ROM + Security` Dual-LUN 구조)로 변환하거나, 가상 CD-ROM 영역(`LUN0`)에 본 프로젝트의 `secure_launcher.iso`를 구우려면 **Innostor IS918 Mass Production Tool (`IS918MPTool`)**이 필요합니다.
 
-| 구분 | 역할 | 파일시스템 / 크기 | 특징 |
-| :--- | :--- | :--- | :--- |
-| **`LUN 0`** | 가상 CD-ROM 런처 영역 | `ISO9660 + Joliet` (~`424 KB`) | 하드웨어 읽기 전용(변조 및 바이러스 감염 원천 차단), `SecureUSBManager.exe` 내장 |
-| **`LUN 1`** | 하드웨어 보안 데이터 영역 | `NTFS` / `exFAT` (나머지 전체 용량, 예: `58.59 GB`) | 잠금 시 디스크 관리에서도 용량이 `0`으로 숨겨지며, 비밀번호 인증 시에만 마운트 및 실사용량 표시 |
+### 1. IS918 MPTool 다운로드
+- **공식 아카이브 (USBDev.ru)**: **[https://www.usbdev.ru/files/innostor/is918mpt/](https://www.usbdev.ru/files/innostor/is918mpt/)**
+- USB 컨트롤러의 리비전(예: `IS918M_GA` 등)에 맞는 버전을 다운로드하여 압축을 해제합니다. (예: `IS918MPTool_GA_221206`)
 
----
-
-## 🚀 빌드 및 실행 방법 (Build & Usage)
-
-### 1. Rust 네이티브 빌드
-외부 크레이트(Cargo 패키지) 의존성이 전혀 없으므로(`Cargo.toml` 내 `[dependencies]` 없음) 인터넷 연결 없이 표준 Rust 툴체인만으로 즉시 빌드됩니다.
-
-```powershell
-cd rust_secure_usb
-cargo build --release
-```
-- 빌드 결과물: `rust_secure_usb/target/release/secure_usb_manager.exe`
-
-### 2. CLI(명령줄) 모드 사용법
-GUI뿐만 아니라 스크립트 자동화를 위한 CLI 명령도 내장되어 있습니다.
-
-```powershell
-# 현재 보안 USB 상태 및 파티션/실사용 용량 확인
-SecureUSBManager.exe status
-
-# 보안 영역 잠금 해제
-SecureUSBManager.exe unlock <비밀번호>
-
-# 보안 영역 즉시 잠금
-SecureUSBManager.exe lock
-
-# 보안 영역 잠금 후 안전 제거(Safe Eject)
-SecureUSBManager.exe eject
-
-# 비밀번호 및 힌트 변경
-SecureUSBManager.exe passwd <현재_비밀번호> <새_비밀번호> [새_힌트]
-```
-
-### 3. CD-ROM 런처 ISO 이미지(`secure_launcher.iso`) 생성 및 MPTool 탑재
-1. `preload_lun0/` 폴더 안에 빌드된 `SecureUSBManager.exe`, `logo.ico`, `autorun.inf`를 배치합니다.
-2. Windows 내장 `IMAPI2FS`를 이용해 `secure_launcher.iso` 이미지를 생성합니다.
-3. `IS918MPTool`의 `Configuration/MPTool.ini`에서 아래와 같이 설정한 후 **`Start`**를 누르면 하드웨어 CD-ROM(`LUN0`)에 런처가 영구 탑재됩니다:
+### 2. `MPTool.ini` 설정 및 보안 파티션 굽기
+1. `IS918MPTool` 폴더 내 `Configuration\MPTool.ini` 파일을 열거나, MPTool 실행 후 `Setting` (초기 비밀번호는 보통 공란 또는 `IS0024`)으로 들어갑니다.
+2. **`[Partition]`** 섹션을 아래와 같이 설정하여 **`LUN0` = 가상 CD-ROM 런처 (`secure_launcher.iso`)**, **`LUN1` = 하드웨어 보안 파티션 (`100%` 데이터 영역)**으로 지정합니다:
    ```ini
    [Partition]
    PartitionNum=2
    PartitionType=5
    Lun0SizeRatio=0
    Lun1SizeRatio=100
-   Lun0CDROMPath=...\secure_launcher.iso
+   Lun0CDROMPath=C:\path\to\secure_launcher.iso
+   Password=1234
+   PwdHint=Admin Inquiry
    NoPWDPwrOnLogin=1
    PwdRetryTimes=10
    ```
+   - `PartitionType=5`: **CD-ROM + Security** 모드 (`0`=Public 단일, `3`=Public+Security, `4`=CD-ROM+Public, `5`=CD-ROM+Security)
+   - `Lun0CDROMPath`: 본 저장소에 포함된 `secure_launcher.iso` 경로를 지정합니다.
+3. MPTool 메인 화면에서 **`Start`**를 클릭해 양산(MP) 작업을 완료한 뒤 USB를 재연결하면, 가상 CD-ROM 드라이브에서 `SecureUSBManager.exe`를 즉시 실행할 수 있습니다.
 
 ---
 
-## 🔬 IS918 하드웨어 보안 SCSI 프로토콜 요약 (Reverse-Engineered Spec)
+## 🚀 빌드 및 CLI 사용 방법 (Build & CLI Usage)
 
-본 프로젝트에서 분석 및 검증한 Innostor `IS918` 컨트롤러의 Vendor-Specific SCSI 명령 규격입니다:
+### 1. Rust 네이티브 빌드
+```powershell
+cd rust_secure_usb
+cargo build --release
+```
+- 빌드 결과물: `rust_secure_usb/target/release/secure_usb_manager.exe`
 
-| 기능 | SCSI CDB (10 Bytes) | 방향 / 길이 | 설명 |
+### 2. CLI(명령줄) 모드
+```powershell
+SecureUSBManager.exe status                              # 상태 및 파티션/실사용 용량 조회
+SecureUSBManager.exe unlock <비밀번호>                    # 보안 영역 잠금 해제
+SecureUSBManager.exe lock                                # 보안 영역 즉시 잠금
+SecureUSBManager.exe eject                               # 잠금 후 안전 제거 (Safe Eject)
+SecureUSBManager.exe passwd <현재_암호> <새_암호> [새_힌트] # 비밀번호 및 힌트 변경
+```
+
+---
+---
+
+# 🇺🇸 English Documentation
+
+**Secure USB Vault Manager** (`SecureUSBManager.exe`) is an ultra-lightweight, native Win32 hardware security partition launcher and vault manager designed for **Innostor `IS918` series (`IS918M_GA`, etc.) USB flash drive controllers**.
+
+It replaces the legacy vendor utility (`IS918SecurityPack.exe`), which suffered from outdated UI, broken CJK character encoding, and the inability to change passwords without reformatting the entire drive. Written in **100% pure Rust (`Zero External Crates`)** using direct Win32 GDI double-buffering and `IOCTL_SCSI_PASS_THROUGH_DIRECT`, it compiles into a single **`~360 KB` standalone executable** with zero runtime dependencies.
+
+---
+
+## ✨ Key Features
+
+### 1. 🔒 Hardware-Level SCSI Security Partition Unlock & Lock
+- Communicates directly with the Innostor `IS918` controller firmware via Windows `IOCTL_SCSI_PASS_THROUGH_DIRECT`.
+- Uses **32-Round Big-Endian TEA (Tiny Encryption Algorithm)** combined with a **one-time dynamic challenge token (`0xE0 0x32`)** to mount (`0xE0 0x33 0x00 0x01`) or dismount & lock (`0xE0 0x33 0x11`) the hardware-hidden security partition (`LUN1`).
+- **Auto-Lock on Exit**: Automatically locks and hides the security partition whenever the manager application is closed.
+
+### 2. 🔑 Password & Hint Change Without Reformatting (Portable Vault)
+- Legacy IS918 tools required a full mass-production reformat to change the password. **Secure USB Vault Manager** implements a **salted SHA-256 portable vault (`.is918_vault.cfg`)** stored directly inside the hidden security partition.
+- Your custom password, password hint, auto-lock timer setting, and UI theme travel **inside the USB drive itself**, working seamlessly across any Windows PC.
+
+### 3. 🚨 10-Attempt Self-Destruct Data Wipe (Mode B)
+- Displays a clear warning dialog with remaining attempts (`9 / 10` down to `1 / 10`) on every failed password entry.
+- Escalates to a **`🚨 [CRITICAL: DATA WIPE IMMINENT!]`** alert when 3 or fewer attempts remain.
+- **Upon 10 consecutive failed attempts (`0 / 10`), the self-destruct protocol executes automatically**:
+  1. Recursively shreds all files inside the security partition using a **3-Pass DoD overwrite (`0x00` → `0xFF` → `PRNG Random`)**.
+  2. Performs a silent **clean `NTFS` quick format** to purge MFT and directory metadata traces.
+  3. Resets the vault to factory state and immediately re-locks the hardware partition.
+
+### 4. ⏱️ Inactivity Auto-Lock Timer & 📥 System Tray Integration
+- **Idle Auto-Lock (`Disabled` / `5 Mins` / `10 Mins` / `15 Mins` / `30 Mins`)**: Monitors system-wide keyboard/mouse idle time (`GetLastInputInfo`) and automatically locks the security drive when you step away from your PC.
+- **System Tray Resident**: Minimize (`_`) or click `[Hide to Tray]` to keep the manager running quietly in the system tray with quick right-click actions (`Open Security Drive Folder`, `Lock Security Partition Now`, `Lock & Safe Eject USB`).
+
+### 5. 🛡️ 3-Pass File Shredder & Safe Hardware Eject
+- **`[File Shredder]`**: Permanently destroys sensitive files on the security drive via 3-pass overwrite before unlinking so forensic recovery tools cannot restore them.
+- **`[Safe Eject]`**: Flushes volumes, dismounts and locks the security partition, and issues `IOCTL_STORAGE_EJECT_MEDIA` for safe USB removal in one click.
+
+### 6. 🌓 Light / Dark Mode & 🌐 Multi-Language (`KO` / `EN` / `JA`)
+- **Light & Dark Themes**: Automatically detects Windows dark mode preference and allows instant toggling via the top **`☀️ Light` / `🌙 Dark`** button (including native dark title bar via `DwmSetWindowAttribute`).
+- **3 Languages with Vector Flag Icons**: Instant switching between **Korean (`한국어`)**, **English (`English`)**, and **Japanese (`日本語`)**, featuring crisp GDI vector-rendered national flags.
+- **Per-Monitor V2 High-DPI Aware**: Razor-sharp typography and flicker-free double-buffered GDI rendering on 100%–250%+ DPI displays.
+
+---
+
+## 🛠️ Downloading IS918 MPTool & Creating a Hardware Secure USB
+
+To configure an Innostor IS918 USB drive into Dual-LUN **`CD-ROM + Security`** mode and embed `secure_launcher.iso` into the read-only virtual CD-ROM partition (`LUN0`), you need the **Innostor IS918 Mass Production Tool (`IS918MPTool`)**.
+
+### 1. Download Innostor IS918 MPTool
+- **Official Archive (USBDev.ru)**: **[https://www.usbdev.ru/files/innostor/is918mpt/](https://www.usbdev.ru/files/innostor/is918mpt/)**
+- Download the MPTool package matching your controller revision (e.g., `IS918M_GA` -> `IS918MPTool_GA_221206`).
+
+### 2. Configure `MPTool.ini` & Flash the Drive
+1. Open `Configuration\MPTool.ini` inside the MPTool folder (or open `Setting` in the MPTool GUI; default password is blank or `IS0024`).
+2. Configure the **`[Partition]`** section for **`PartitionType=5` (`CD-ROM + Security`)**:
+   ```ini
+   [Partition]
+   PartitionNum=2
+   PartitionType=5
+   Lun0SizeRatio=0
+   Lun1SizeRatio=100
+   Lun0CDROMPath=C:\path\to\secure_launcher.iso
+   Password=1234
+   PwdHint=Admin Inquiry
+   NoPWDPwrOnLogin=1
+   PwdRetryTimes=10
+   ```
+   - `PartitionType=5`: Sets **LUN0 = Virtual CD-ROM** and **LUN1 = Hardware Security Partition** (`100%` capacity).
+   - `Lun0CDROMPath`: Point this to `secure_launcher.iso` included in this repository.
+3. Click **`Start`** in `IS918MPTool.exe`. Once completed, replug the USB drive to access `SecureUSBManager.exe` directly from the hardware read-only CD-ROM drive.
+
+---
+
+## 🔬 Reverse-Engineered IS918 Hardware Security SCSI Protocol
+
+Below is the vendor-specific SCSI command specification (`IOCTL_SCSI_PASS_THROUGH_DIRECT`) verified on live Innostor `IS918M_GA` hardware:
+
+| Operation | SCSI CDB (10 Bytes) | Direction / Size | Description |
 | :--- | :--- | :--- | :--- |
-| **컨트롤러 식별** | `12 00 00 00 60 00 00 00 00 00` | `DATA_IN` (`96B`) | 표준 `INQUIRY`. 오프셋 `40..44` 바이트가 `"BWSE"` 시그니처인지 확인 |
-| **Flash ID 조회** | `E0 10 06 90 00 0E 00 00 00 00` | `DATA_IN` (`512B`) | 오프셋 `0..6` 바이트에 NAND Flash 고유 ID 반환 |
-| **파티션 테이블 조회** | `E0 30 00 00 00 00 00 00 01 00` | `DATA_IN` (`512B`) | 오프셋 `0x10 + i*4`에 Big-Endian `u32` 섹터 수, `0x30 + i`에 LUN 속성 플래그 반환 |
-| **보안 상태/토큰 조회** | `E0 32 00 00 00 00 00 01 06 00` | `DATA_IN` (`48B` / `0x30`) | **[주의]** 길이는 반드시 `0x30`이어야 함.<br>`buf[0]`: 1회용 동적 챌린지 토큰<br>`buf[1]`: 남은 재시도 횟수<br>`buf[2] & 1`: 잠금 해제 여부 (`1`=열림, `0`=잠김)<br>`buf[15]`: 최대 재시도 제한<br>`buf[32..48]`: ASCII 비밀번호 힌트 |
-| **하드웨어 잠금 해제** | `E0 33 00 01 00 00 00 01 00 00` | `DATA_OUT` (`512B`) | 직전 `0xE0 0x32` 호출에서 받은 `buf[0]` 토큰으로 128-bit TEA 키 `[token + 0x266EC300, 0x36D9C77D, 0xE48D5124, 0xAD7275C8]`를 구성하여 16바이트 비밀번호(`plain32[0..16]`)를 32라운드 암호화한 뒤 전송 |
-| **하드웨어 즉시 잠금** | `E0 33 11 00 00 00 00 00 01 00` | `UNSPECIFIED` (`0B`) | 볼륨 `FSCTL_LOCK_VOLUME` 및 `FSCTL_DISMOUNT_VOLUME` 후 전송 시 즉시 하드웨어 잠금 |
+| **Identify Controller** | `12 00 00 00 60 00 00 00 00 00` | `DATA_IN` (`96B`) | Standard `INQUIRY`. Bytes `40..44` must equal `"BWSE"`. |
+| **Read Flash ID** | `E0 10 06 90 00 0E 00 00 00 00` | `DATA_IN` (`512B`) | Returns 6-byte physical NAND Flash ID at offset `0..6`. |
+| **Read Partition Table** | `E0 30 00 00 00 00 00 00 01 00` | `DATA_IN` (`512B`) | Big-Endian `u32` sector counts for `LUN0..3` at `0x10 + i*4`; LUN flags at `0x30 + i`. |
+| **Read Security Info** | `E0 32 00 00 00 00 00 01 06 00` | `DATA_IN` (`48B` / `0x30`) | **[CRITICAL]** Transfer length must be `0x30` (48 bytes).<br>`buf[0]`: One-time dynamic challenge token<br>`buf[1]`: Remaining retry count<br>`buf[2] & 1`: Unlock state (`1`=Unlocked, `0`=Locked)<br>`buf[15]`: Max retry limit<br>`buf[32..48]`: ASCII password hint |
+| **Hardware Unlock** | `E0 33 00 01 00 00 00 01 00 00` | `DATA_OUT` (`512B`) | Encrypts 16-byte password (`plain32[0..16]`) using 32-round Big-Endian TEA with 128-bit key `[token + 0x266EC300, 0x36D9C77D, 0xE48D5124, 0xAD7275C8]` where `token` is `buf[0]` from the immediately preceding `0xE0 0x32` call. |
+| **Hardware Lock** | `E0 33 11 00 00 00 00 00 01 00` | `UNSPECIFIED` (`0B`) | Dismount `LUN1` (`FSCTL_LOCK_VOLUME` + `FSCTL_DISMOUNT_VOLUME`) first, then send `0xE0 0x33 0x11`. |
 
 ---
 
-## 📂 디렉터리 구조 (Repository Structure)
+## 📂 Repository Structure
 
 ```text
-├── README.md                       # 프로젝트 문서 (본 파일)
-├── preview.png                     # 프로그램 실행 화면 미리보기 스크린샷
-├── .gitignore                      # Git 제외 파일 설정
-├── secure_shield.ico               # 멀티 해상도(16/32/48px) 커스텀 방패 아이콘
-├── SecureUSBManager.exe            # 최신 빌드된 Rust 네이티브 실행 파일 (~345 KB)
-├── secure_launcher.iso             # MPTool 탑재용 CD-ROM(LUN0) ISO 이미지 (~424 KB)
-├── rust_secure_usb/                # 순수 Rust 네이티브 Win32 프로젝트
-│   ├── Cargo.toml                  # 외부 의존성 0개, 최소 크기(opt-level="z", LTO) 설정
-│   ├── build.rs                    # Windows RC 리소스(아이콘/매니페스트/버전정보) 컴파일러
-│   ├── app.rc                      # PerMonitorV2 DPI 매니페스트 및 다국어 VERSIONINFO
+├── README.md                       # Bilingual Project Documentation (KO / EN)
+├── preview.png                     # Application UI Preview Screenshot
+├── .gitignore                      # Git ignore rules
+├── secure_shield.ico               # Multi-resolution (16/32/48px) shield icon
+├── SecureUSBManager.exe            # Prebuilt Pure Rust Win32 executable (~360 KB)
+├── secure_launcher.iso             # Ready-to-flash CD-ROM (LUN0) ISO image (~424 KB)
+├── rust_secure_usb/                # Pure Rust Native Win32 Source Project
+│   ├── Cargo.toml                  # Zero dependencies, size-optimized release profile
+│   ├── build.rs                    # Windows RC resource compiler script
+│   ├── app.rc                      # PerMonitorV2 High-DPI manifest & VERSIONINFO
 │   └── src/
-│       └── main.rs                 # SCSI 엔진, TEA/SHA-256, GDI 더블버퍼링 UI, 세단기 전체 구현
-└── preload_lun0/                   # USB 가상 CD-ROM(LUN0) ISO 원본 폴더
-    ├── SecureUSBManager.exe        # CD-ROM 내장 실행 파일
-    ├── logo.ico                    # 드라이브 아이콘
-    └── autorun.inf                 # CD-ROM 볼륨 아이콘 및 자동실행 정의
+│       └── main.rs                 # SCSI engine, TEA/SHA-256, GDI UI, 3-pass shredder
+└── preload_lun0/                   # Source files for CD-ROM (LUN0) ISO image
+    ├── SecureUSBManager.exe        # Bundled launcher executable
+    ├── logo.ico                    # Volume icon
+    └── autorun.inf                 # CD-ROM icon & label definition
 ```
 
 ---
 
-## 📜 라이선스 (License)
+## 📜 License
 
 This project is licensed under the **MIT License**.
