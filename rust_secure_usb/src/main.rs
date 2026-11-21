@@ -1008,7 +1008,7 @@ fn encrypt_password_tea(password: &str, dynamic_token: u8) -> [u8; 32] {
 fn open_drive_handle(drive_letter: &str) -> HANDLE {
     let path = to_wide(&format!("\\\\.\\{}", drive_letter));
     unsafe {
-        CreateFileW(
+        let mut h = CreateFileW(
             path.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1016,7 +1016,19 @@ fn open_drive_handle(drive_letter: &str) -> HANDLE {
             OPEN_EXISTING,
             0,
             null_mut(),
-        )
+        );
+        if h == INVALID_HANDLE_VALUE {
+            h = CreateFileW(
+                path.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null_mut(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            );
+        }
+        h
     }
 }
 
@@ -1155,12 +1167,21 @@ fn update_effective_vault_metadata(dev: &mut DeviceInfo) {
 fn is_usb_candidate_drive(drv: &str) -> bool {
     let root = to_wide(&format!("{}\\", drv));
     let dt = unsafe { GetDriveTypeW(root.as_ptr()) };
+    // DRIVE_REMOVABLE (2) or DRIVE_CDROM (5)
     dt == 2 || dt == 5
+}
+
+fn is_fixed_drive(drv: &str) -> bool {
+    let root = to_wide(&format!("{}\\", drv));
+    let dt = unsafe { GetDriveTypeW(root.as_ptr()) };
+    // DRIVE_FIXED (3)
+    dt == 3
 }
 
 fn scan_devices() -> Vec<DeviceInfo> {
     let mut raw_list = Vec::new();
     let mask = unsafe { GetLogicalDrives() };
+    // Pass 1: Removable (2) & CD-ROM (5) drives
     for i in 2..26 {
         if (mask & (1 << i)) != 0 {
             let drv = format!("{}:", (b'A' + i as u8) as char);
@@ -1168,6 +1189,31 @@ fn scan_devices() -> Vec<DeviceInfo> {
                 continue;
             }
             if let Some(info) = query_drive(&drv) {
+                raw_list.push(info);
+            }
+        }
+    }
+
+    // Pass 2: Fallback for PCs where the USB controller reports as DRIVE_FIXED (3) (skip C:)
+    if raw_list.is_empty() {
+        for i in 3..26 {
+            if (mask & (1 << i)) != 0 {
+                let drv = format!("{}:", (b'A' + i as u8) as char);
+                if !is_fixed_drive(&drv) {
+                    continue;
+                }
+                if let Some(info) = query_drive(&drv) {
+                    raw_list.push(info);
+                }
+            }
+        }
+    }
+
+    // Pass 3: Fallback to PhysicalDrive1..12 if no logical drive letters matched
+    if raw_list.is_empty() {
+        for p in 1..=12 {
+            let pdrv = format!("PhysicalDrive{}", p);
+            if let Some(info) = query_drive(&pdrv) {
                 raw_list.push(info);
             }
         }
@@ -1211,7 +1257,7 @@ fn wait_for_security_drive_letter(public_drv: &str, known_sec_drv: Option<&str>,
         for i in 2..26 {
             if (mask & (1 << i)) != 0 {
                 let drv = format!("{}:", (b'A' + i as u8) as char);
-                if drv.eq_ignore_ascii_case(public_drv) || !is_usb_candidate_drive(&drv) {
+                if drv.eq_ignore_ascii_case(public_drv) || (!is_usb_candidate_drive(&drv) && !is_fixed_drive(&drv)) {
                     continue;
                 }
                 if is_drive_ready(&drv) && query_drive(&drv).is_some() {
