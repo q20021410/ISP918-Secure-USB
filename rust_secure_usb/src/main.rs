@@ -145,6 +145,7 @@ const ES_PASSWORD: DWORD = 0x0020;
 const ES_AUTOHSCROLL: DWORD = 0x0080;
 
 const WM_DESTROY: UINT = 0x0002;
+const WM_SIZE: UINT = 0x0005;
 const WM_CLOSE: UINT = 0x0010;
 const WM_PAINT: UINT = 0x000F;
 const WM_ERASEBKGND: UINT = 0x0014;
@@ -157,8 +158,14 @@ const WM_CTLCOLOREDIT: UINT = 0x0133;
 const WM_CTLCOLORBTN: UINT = 0x0135;
 const WM_CTLCOLORSTATIC: UINT = 0x0138;
 const WM_DEVICECHANGE: UINT = 0x0219;
+const WM_DPICHANGED: UINT = 0x02E0;
 const WM_USER: UINT = 0x0400;
 const WM_TRAYICON: UINT = WM_USER + 55;
+
+const CS_VREDRAW: UINT = 0x0001;
+const CS_HREDRAW: UINT = 0x0002;
+const SWP_NOZORDER: UINT = 0x0004;
+const SWP_NOACTIVATE: UINT = 0x0010;
 
 const WM_LBUTTONDBLCLK: usize = 0x0203;
 const WM_RBUTTONUP: usize = 0x0205;
@@ -417,6 +424,7 @@ extern "system" {
     ) -> BOOL;
     fn GetTickCount() -> DWORD;
     fn GetLocalTime(lp_system_time: *mut SYSTEMTIME);
+    fn GetProcAddress(h_module: HINSTANCE, lp_proc_name: *const u8) -> *mut c_void;
 }
 
 #[link(name = "user32")]
@@ -436,6 +444,8 @@ extern "system" {
         h_instance: HINSTANCE,
         lp_param: *mut c_void,
     ) -> HWND;
+    fn MoveWindow(h_wnd: HWND, x: i32, y: i32, n_width: i32, n_height: i32, b_repaint: BOOL) -> BOOL;
+    fn SetWindowPos(h_wnd: HWND, h_wnd_insert_after: HWND, x: i32, y: i32, cx: i32, cy: i32, u_flags: UINT) -> BOOL;
     fn ShowWindow(h_wnd: HWND, n_cmd_show: i32) -> BOOL;
     fn UpdateWindow(h_wnd: HWND) -> BOOL;
     fn GetMessageW(lp_msg: *mut MSG, h_wnd: HWND, w_msg_filter_min: UINT, w_msg_filter_max: UINT) -> BOOL;
@@ -2797,6 +2807,7 @@ fn show_change_password_dialog(
 // ============================================================================
 unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
     let s = state.dpi_scale;
+    let cw = sc(700, s);
     let dark = state.dark_mode;
 
     let bg_main = if dark { rgb(15, 23, 42) } else { rgb(241, 245, 249) };
@@ -2811,9 +2822,10 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
     fill_solid_rect(hdc, rc_client, bg_main);
 
     // 1. Top Dark Navy Header Banner
-    let rc_banner = RECT { left: 0, top: 0, right: rc_client.right, bottom: sc(74, s) };
+    let banner_r = rc_client.right.max(cw);
+    let rc_banner = RECT { left: 0, top: 0, right: banner_r, bottom: sc(74, s) };
     fill_solid_rect(hdc, &rc_banner, bg_banner);
-    let rc_accent = RECT { left: 0, top: sc(74, s), right: rc_client.right, bottom: sc(77, s) };
+    let rc_accent = RECT { left: 0, top: sc(74, s), right: banner_r, bottom: sc(77, s) };
     fill_solid_rect(hdc, &rc_accent, rgb(56, 189, 248));
 
     if !state.h_icon.is_null() {
@@ -2855,9 +2867,9 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
         }
     };
     let rc_badge = RECT {
-        left: rc_client.right - sc(142, s),
+        left: cw - sc(142, s),
         top: sc(23, s),
-        right: rc_client.right - sc(20, s),
+        right: cw - sc(20, s),
         bottom: sc(51, s),
     };
     draw_rounded_box(hdc, &rc_badge, badge_col, badge_border, sc(8, s));
@@ -2884,7 +2896,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
     let rc_card1 = RECT {
         left: sc(20, s),
         top: sc(154, s),
-        right: rc_client.right - sc(20, s),
+        right: cw - sc(20, s),
         bottom: sc(326, s),
     };
     draw_rounded_box(hdc, &rc_card1, bg_card, border_card, sc(10, s));
@@ -3077,7 +3089,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
     let rc_card2 = RECT {
         left: sc(20, s),
         top: sc(336, s),
-        right: rc_client.right - sc(20, s),
+        right: cw - sc(20, s),
         bottom: sc(520, s),
     };
     draw_rounded_box(hdc, &rc_card2, bg_card, border_card, sc(10, s));
@@ -3798,6 +3810,22 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
 
             DefWindowProcW(hwnd, msg, w_param, l_param)
         }
+        WM_SIZE => {
+            InvalidateRect(hwnd, null(), 1);
+            0
+        }
+        WM_DPICHANGED => {
+            let new_dpi = (w_param & 0xFFFF) as i32;
+            let sug_rc = if l_param != 0 {
+                Some(&*(l_param as *const RECT))
+            } else {
+                None
+            };
+            if let Some(state) = get_state_mut() {
+                apply_dpi_scale(state, new_dpi, sug_rc);
+            }
+            0
+        }
         WM_DESTROY => {
             KillTimer(hwnd, TIMER_IDLE_CHECK);
             if let Some(state) = get_state_mut() {
@@ -3824,6 +3852,141 @@ fn create_app_font(height: i32, weight: i32) -> HFONT {
     }
 }
 
+unsafe fn get_window_dpi(hwnd: HWND, fallback_dpi: i32) -> i32 {
+    type GetDpiForWindowFn = unsafe extern "system" fn(HWND) -> UINT;
+    let u32_name = to_wide("user32.dll");
+    let h_mod = GetModuleHandleW(u32_name.as_ptr());
+    if !h_mod.is_null() {
+        let fn_ptr = GetProcAddress(h_mod, b"GetDpiForWindow\0".as_ptr());
+        if !fn_ptr.is_null() {
+            let f: GetDpiForWindowFn = std::mem::transmute(fn_ptr);
+            let dpi = f(hwnd) as i32;
+            if dpi >= 96 {
+                return dpi;
+            }
+        }
+    }
+    fallback_dpi.max(96)
+}
+
+unsafe fn adjust_window_rect_dpi(rc: &mut RECT, style: DWORD, ex_style: DWORD, dpi: i32) {
+    type AdjustWindowRectExForDpiFn = unsafe extern "system" fn(*mut RECT, DWORD, BOOL, DWORD, UINT) -> BOOL;
+    let u32_name = to_wide("user32.dll");
+    let h_mod = GetModuleHandleW(u32_name.as_ptr());
+    if !h_mod.is_null() {
+        let fn_ptr = GetProcAddress(h_mod, b"AdjustWindowRectExForDpi\0".as_ptr());
+        if !fn_ptr.is_null() {
+            let f: AdjustWindowRectExForDpiFn = std::mem::transmute(fn_ptr);
+            if f(rc, style, 0, ex_style, dpi as UINT) != 0 {
+                return;
+            }
+        }
+    }
+    AdjustWindowRectEx(rc, style, 0, ex_style);
+}
+
+unsafe fn apply_dpi_scale(state: &mut AppUiState, new_dpi: i32, suggested_rc: Option<&RECT>) {
+    let scale = if new_dpi > 96 { (new_dpi as f32) / 96.0 } else { 1.0 };
+    state.dpi_scale = scale;
+
+    let old_f1 = state.font_title;
+    let old_f2 = state.font_card_hdr;
+    let old_f3 = state.font_bold;
+    let old_f4 = state.font_reg;
+    let old_f5 = state.font_small_bold;
+
+    state.font_title = create_app_font(-sc(21, scale), 700);
+    state.font_card_hdr = create_app_font(-sc(15, scale), 700);
+    state.font_bold = create_app_font(-sc(14, scale), 700);
+    state.font_reg = create_app_font(-sc(14, scale), 400);
+    state.font_small_bold = create_app_font(-sc(13, scale), 700);
+
+    let win_style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    let mut rc_win = RECT {
+        left: 0,
+        top: 0,
+        right: sc(700, scale),
+        bottom: sc(536, scale),
+    };
+    adjust_window_rect_dpi(&mut rc_win, win_style, 0, new_dpi);
+    let win_w = rc_win.right - rc_win.left;
+    let win_h = rc_win.bottom - rc_win.top;
+
+    if let Some(sug) = suggested_rc {
+        SetWindowPos(
+            state.hwnd_main,
+            null_mut(),
+            sug.left,
+            sug.top,
+            win_w,
+            win_h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    } else {
+        let mut cur_rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(state.hwnd_main, &mut cur_rc);
+        SetWindowPos(
+            state.hwnd_main,
+            null_mut(),
+            cur_rc.left,
+            cur_rc.top,
+            win_w,
+            win_h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+
+    MoveWindow(state.btn_theme, sc(436, scale), sc(84, scale), sc(98, scale), sc(28, scale), 1);
+    MoveWindow(state.cmb_lang, sc(542, scale), sc(84, scale), sc(138, scale), sc(28, scale), 1);
+    MoveWindow(state.cmb_dev, sc(20, scale), sc(114, scale), sc(542, scale), sc(32, scale), 1);
+    MoveWindow(state.btn_refresh, sc(570, scale), sc(114, scale), sc(110, scale), sc(32, scale), 1);
+
+    MoveWindow(state.txt_pwd, sc(132, scale), sc(379, scale), sc(205, scale), sc(30, scale), 1);
+    SendMessageW(state.txt_pwd, WM_SETFONT, state.font_reg as WPARAM, 1);
+    SendMessageW(
+        state.txt_pwd,
+        EM_SETMARGINS,
+        3,
+        (((sc(8, scale) as isize) << 16) | (sc(8, scale) as isize)) as LPARAM,
+    );
+
+    MoveWindow(state.chk_show_pwd, sc(344, scale), sc(382, scale), sc(68, scale), sc(24, scale), 1);
+    SendMessageW(state.chk_show_pwd, WM_SETFONT, state.font_reg as WPARAM, 1);
+
+    MoveWindow(state.cmb_idle_timer, sc(532, scale), sc(379, scale), sc(132, scale), sc(30, scale), 1);
+
+    MoveWindow(state.btn_unlock, sc(36, scale), sc(420, scale), sc(200, scale), sc(42, scale), 1);
+    MoveWindow(state.btn_lock, sc(250, scale), sc(420, scale), sc(200, scale), sc(42, scale), 1);
+    MoveWindow(state.btn_change_pwd, sc(464, scale), sc(420, scale), sc(200, scale), sc(42, scale), 1);
+
+    MoveWindow(state.btn_open_drv, sc(36, scale), sc(474, scale), sc(151, scale), sc(32, scale), 1);
+    MoveWindow(state.btn_shred, sc(197, scale), sc(474, scale), sc(151, scale), sc(32, scale), 1);
+    MoveWindow(state.btn_safe_eject, sc(358, scale), sc(474, scale), sc(151, scale), sc(32, scale), 1);
+    MoveWindow(state.btn_to_tray, sc(519, scale), sc(474, scale), sc(145, scale), sc(32, scale), 1);
+
+    if !old_f1.is_null() { DeleteObject(old_f1 as HGDIOBJ); }
+    if !old_f2.is_null() { DeleteObject(old_f2 as HGDIOBJ); }
+    if !old_f3.is_null() { DeleteObject(old_f3 as HGDIOBJ); }
+    if !old_f4.is_null() { DeleteObject(old_f4 as HGDIOBJ); }
+    if !old_f5.is_null() { DeleteObject(old_f5 as HGDIOBJ); }
+
+    InvalidateRect(state.hwnd_main, null(), 1);
+    InvalidateRect(state.btn_theme, null(), 1);
+    InvalidateRect(state.cmb_lang, null(), 1);
+    InvalidateRect(state.cmb_dev, null(), 1);
+    InvalidateRect(state.btn_refresh, null(), 1);
+    InvalidateRect(state.txt_pwd, null(), 1);
+    InvalidateRect(state.chk_show_pwd, null(), 1);
+    InvalidateRect(state.cmb_idle_timer, null(), 1);
+    InvalidateRect(state.btn_unlock, null(), 1);
+    InvalidateRect(state.btn_lock, null(), 1);
+    InvalidateRect(state.btn_change_pwd, null(), 1);
+    InvalidateRect(state.btn_open_drv, null(), 1);
+    InvalidateRect(state.btn_shred, null(), 1);
+    InvalidateRect(state.btn_safe_eject, null(), 1);
+    InvalidateRect(state.btn_to_tray, null(), 1);
+}
+
 fn run_gui() {
     unsafe {
         let (saved_lang, saved_idle_mins, saved_dark_mode) = load_app_prefs();
@@ -3844,7 +4007,7 @@ fn run_gui() {
 
         let wc = WNDCLASSEXW {
             cb_size: std::mem::size_of::<WNDCLASSEXW>() as UINT,
-            style: 0,
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfn_wnd_proc: main_wnd_proc,
             cb_cls_extra: 0,
             cb_wnd_extra: 0,
@@ -3865,7 +4028,7 @@ fn run_gui() {
             right: sc(700, scale),
             bottom: sc(536, scale),
         };
-        AdjustWindowRectEx(&mut rc_win, win_style, 0, 0);
+        adjust_window_rect_dpi(&mut rc_win, win_style, 0, dpi_x);
         let win_w = rc_win.right - rc_win.left;
         let win_h = rc_win.bottom - rc_win.top;
 
@@ -4148,7 +4311,11 @@ fn run_gui() {
 
         let ptr = &raw mut APP_STATE;
         *ptr = Some(st);
+        let actual_dpi = get_window_dpi(hwnd, dpi_x);
         if let Some(state) = get_state_mut() {
+            if actual_dpi != dpi_x {
+                apply_dpi_scale(state, actual_dpi, None);
+            }
             apply_language_and_refresh(state, true);
         }
 
