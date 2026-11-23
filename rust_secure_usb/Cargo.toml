@@ -1,6 +1,6 @@
 [package]
 name = "secure_usb_manager"
-version = "2.5.3"
+version = "2.5.4"
 edition = "2021"
 authors = ["Secure USB Suite"]
 description = "Native Win32 Hardware Security Partition & Vault Manager"
