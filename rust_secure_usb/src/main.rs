@@ -424,6 +424,7 @@ extern "system" {
     ) -> BOOL;
     fn GetTickCount() -> DWORD;
     fn GetLocalTime(lp_system_time: *mut SYSTEMTIME);
+    fn LoadLibraryW(lp_lib_file_name: *const u16) -> HINSTANCE;
     fn GetProcAddress(h_module: HINSTANCE, lp_proc_name: *const u8) -> *mut c_void;
 }
 
@@ -532,11 +533,6 @@ extern "system" {
     fn BitBlt(hdc: HDC, x: i32, y: i32, cx: i32, cy: i32, hdc_src: HDC, x1: i32, y1: i32, rop: DWORD) -> BOOL;
     fn DeleteDC(hdc: HDC) -> BOOL;
     fn GetDeviceCaps(hdc: HDC, index: i32) -> i32;
-}
-
-#[link(name = "dwmapi")]
-extern "system" {
-    fn DwmSetWindowAttribute(hwnd: HWND, dw_attribute: DWORD, pv_attribute: *const c_void, cb_attribute: DWORD) -> i32;
 }
 
 #[link(name = "advapi32")]
@@ -757,9 +753,18 @@ fn detect_system_dark_mode() -> bool {
 
 fn apply_window_dark_titlebar(hwnd: HWND, dark: bool) {
     unsafe {
-        let val: BOOL = if dark { 1 } else { 0 };
-        let _ = DwmSetWindowAttribute(hwnd, 20, &val as *const _ as *const c_void, 4);
-        let _ = DwmSetWindowAttribute(hwnd, 19, &val as *const _ as *const c_void, 4);
+        type DwmSetWindowAttributeFn = unsafe extern "system" fn(HWND, DWORD, *const c_void, DWORD) -> i32;
+        let dwm_name = to_wide("dwmapi.dll");
+        let h_mod = LoadLibraryW(dwm_name.as_ptr());
+        if !h_mod.is_null() {
+            let fn_ptr = GetProcAddress(h_mod, b"DwmSetWindowAttribute\0".as_ptr());
+            if !fn_ptr.is_null() {
+                let f: DwmSetWindowAttributeFn = std::mem::transmute(fn_ptr);
+                let val: BOOL = if dark { 1 } else { 0 };
+                let _ = f(hwnd, 20, &val as *const _ as *const c_void, 4);
+                let _ = f(hwnd, 19, &val as *const _ as *const c_void, 4);
+            }
+        }
     }
 }
 
