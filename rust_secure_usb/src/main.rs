@@ -113,9 +113,10 @@ const GENERIC_WRITE: DWORD = 0x40000000;
 const FILE_SHARE_READ: DWORD = 0x00000001;
 const FILE_SHARE_WRITE: DWORD = 0x00000002;
 const OPEN_EXISTING: DWORD = 3;
-const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
+const FILE_ATTRIBUTE_READONLY: DWORD = 0x00000001;
 const FILE_ATTRIBUTE_HIDDEN: DWORD = 0x00000002;
 const FILE_ATTRIBUTE_SYSTEM: DWORD = 0x00000004;
+const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
 
 const IOCTL_SCSI_PASS_THROUGH_DIRECT: DWORD = 0x0004D014;
 const FSCTL_LOCK_VOLUME: DWORD = 0x00090018;
@@ -769,27 +770,29 @@ fn restore_security_autorun_and_icon(sec_drv: &str, force: bool) -> bool {
         }
     }
 
+    let wico = to_wide(&ico_path.to_string_lossy());
     if force || !ico_path.exists() {
-        let wico = to_wide(&ico_path.to_string_lossy());
         unsafe {
             SetFileAttributesW(wico.as_ptr(), FILE_ATTRIBUTE_NORMAL);
         }
-        if fs::write(&ico_path, EMBEDDED_LOGO_ICO).is_ok() {
-            unsafe {
-                SetFileAttributesW(wico.as_ptr(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
-            }
+        let _ = fs::write(&ico_path, EMBEDDED_LOGO_ICO);
+    }
+    if ico_path.exists() {
+        unsafe {
+            SetFileAttributesW(wico.as_ptr(), FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN);
         }
     }
 
+    let winf = to_wide(&inf_path.to_string_lossy());
     if force || !inf_path.exists() {
-        let winf = to_wide(&inf_path.to_string_lossy());
         unsafe {
             SetFileAttributesW(winf.as_ptr(), FILE_ATTRIBUTE_NORMAL);
         }
-        if fs::write(&inf_path, EMBEDDED_AUTORUN_INF).is_ok() {
-            unsafe {
-                SetFileAttributesW(winf.as_ptr(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
-            }
+        let _ = fs::write(&inf_path, EMBEDDED_AUTORUN_INF);
+    }
+    if inf_path.exists() {
+        unsafe {
+            SetFileAttributesW(winf.as_ptr(), FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN);
         }
     }
 
@@ -4663,7 +4666,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
     );
     draw_text_rect(
         hdc,
-        "v2.5.5",
+        "v2.5.6",
         rc_ver,
         state.font_small_bold,
         if dark { rgb(125, 211, 252) } else { rgb(29, 78, 216) },
@@ -5125,7 +5128,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
         let info_rows: [(&str, String); 7] = [
             (
                 tr("프로그램 / 버전", "App / Version", "プログラム / 版"),
-                "IS918 Secure USB Manager  ·  v2.5.5 (x86_64 Static CRT / WinPE)".to_string(),
+                "IS918 Secure USB Manager  ·  v2.5.6 (x86_64 Static CRT / WinPE)".to_string(),
             ),
             (
                 tr("출처 / 제작자", "Source / Author", "出典 / 制作者"),
@@ -6125,9 +6128,9 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                                         "✅ [{}] {}",
                                         target,
                                         tr(
-                                            "보안 드라이브에 autorun.inf 및 아이콘(logo.ico) 복구가 완료되었습니다!\n(숨김·시스템 보호 속성 적용 완료)",
-                                            "Successfully restored autorun.inf and drive icon (logo.ico)!",
-                                            "autorun.inf およびドライブアイコン (logo.ico) の復元が完了しました！"
+                                            "보안 드라이브에 autorun.inf 및 아이콘(logo.ico) 복구가 완료되었습니다!\n(읽기 전용·숨김 속성 및 'Secure USB' 라벨 적용 완료)",
+                                            "Successfully restored autorun.inf and drive icon (logo.ico) with Read-Only & Hidden attributes!",
+                                            "autorun.inf およびドライブアイコン (logo.ico) の復元が完了しました！(読み取り専用・隠しファイル属性適用)"
                                         )
                                     ),
                                 ));
