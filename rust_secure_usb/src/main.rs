@@ -307,6 +307,27 @@ struct POINT {
 }
 
 #[repr(C)]
+struct BITMAPINFOHEADER {
+    bi_size: DWORD,
+    bi_width: i32,
+    bi_height: i32,
+    bi_planes: u16,
+    bi_bit_count: u16,
+    bi_compression: DWORD,
+    bi_size_image: DWORD,
+    bi_x_pels_per_meter: i32,
+    bi_y_pels_per_meter: i32,
+    bi_clr_used: DWORD,
+    bi_clr_important: DWORD,
+}
+
+#[repr(C)]
+struct BITMAPINFO {
+    bmi_header: BITMAPINFOHEADER,
+    bmi_colors: [u32; 1],
+}
+
+#[repr(C)]
 struct MSG {
     hwnd: HWND,
     message: UINT,
@@ -414,6 +435,7 @@ extern "system" {
     fn GetModuleHandleW(lp_module_name: *const u16) -> HINSTANCE;
     fn GetUserDefaultUILanguage() -> u16;
     fn SetFileAttributesW(lp_file_name: *const u16, dw_file_attributes: DWORD) -> BOOL;
+    fn SetVolumeLabelW(lp_root_path_name: *const u16, lp_volume_name: *const u16) -> BOOL;
     fn GetDriveTypeW(lp_root_path_name: *const u16) -> UINT;
     fn GetLogicalDrives() -> DWORD;
     fn GetDiskFreeSpaceExW(
@@ -460,6 +482,8 @@ extern "system" {
     fn SetWindowTextW(h_wnd: HWND, lp_string: *const u16) -> BOOL;
     fn GetWindowTextW(h_wnd: HWND, lp_string: *mut u16, n_max_count: i32) -> i32;
     fn EnableWindow(h_wnd: HWND, b_enable: BOOL) -> BOOL;
+    fn IsWindowEnabled(h_wnd: HWND) -> BOOL;
+    fn IsWindowVisible(h_wnd: HWND) -> BOOL;
     fn InvalidateRect(h_wnd: HWND, lp_rect: *const RECT, b_erase: BOOL) -> BOOL;
     fn GetClientRect(h_wnd: HWND, lp_rect: *mut RECT) -> BOOL;
     fn GetWindowRect(h_wnd: HWND, lp_rect: *mut RECT) -> BOOL;
@@ -484,6 +508,7 @@ extern "system" {
     ) -> BOOL;
     fn GetSystemMetrics(n_index: i32) -> i32;
     fn SetFocus(h_wnd: HWND) -> HWND;
+    fn GetFocus() -> HWND;
     fn GetDC(h_wnd: HWND) -> HDC;
     fn ReleaseDC(h_wnd: HWND, h_dc: HDC) -> i32;
     fn SetTimer(h_wnd: HWND, n_id_event: usize, u_elapse: UINT, lp_timer_func: *mut c_void) -> usize;
@@ -494,7 +519,9 @@ extern "system" {
     fn TrackPopupMenu(h_menu: HMENU, u_flags: UINT, x: i32, y: i32, n_reserved: i32, h_wnd: HWND, prc_rect: *const RECT) -> BOOL;
     fn DestroyMenu(h_menu: HMENU) -> BOOL;
     fn GetCursorPos(lp_point: *mut POINT) -> BOOL;
+    fn ScreenToClient(h_wnd: HWND, lp_point: *mut POINT) -> BOOL;
     fn SetForegroundWindow(h_wnd: HWND) -> BOOL;
+    fn SetLayeredWindowAttributes(h_wnd: HWND, cr_key: COLORREF, b_alpha: u8, dw_flags: DWORD) -> BOOL;
 }
 
 #[link(name = "gdi32")]
@@ -531,6 +558,21 @@ extern "system" {
     fn CreateCompatibleDC(hdc: HDC) -> HDC;
     fn CreateCompatibleBitmap(hdc: HDC, cx: i32, cy: i32) -> HBITMAP;
     fn BitBlt(hdc: HDC, x: i32, y: i32, cx: i32, cy: i32, hdc_src: HDC, x1: i32, y1: i32, rop: DWORD) -> BOOL;
+    fn StretchDIBits(
+        hdc: HDC,
+        x_dest: i32,
+        y_dest: i32,
+        dest_width: i32,
+        dest_height: i32,
+        x_src: i32,
+        y_src: i32,
+        src_width: i32,
+        src_height: i32,
+        lp_bits: *const c_void,
+        lpbmi: *const BITMAPINFO,
+        i_usage: UINT,
+        rop: DWORD,
+    ) -> i32;
     fn DeleteDC(hdc: HDC) -> BOOL;
     fn GetDeviceCaps(hdc: HDC, index: i32) -> i32;
 }
@@ -684,11 +726,11 @@ impl DeviceInfo {
         let st = if !self.has_security_lun {
             tr("일반 단일 파티션", "Public Partition Only", "通常単一パーティション")
         } else if self.is_unlocked {
-            tr("보안 영역 열림 (Unlocked)", "Security Unlocked", "セキュリティ領域 解除済")
+            tr("잠금 해제됨 (Unlocked)", "Unlocked", "ロック解除済")
         } else {
-            tr("보안 영역 잠김 (Locked)", "Security Locked", "セキュリティ領域 ロック中")
+            tr("잠김 (Locked)", "Locked", "ロック中")
         };
-        format!("[{}] {} {} ({:.1} GB)  —  {}", self.drive_letter, self.vendor, self.product, self.total_gb(), st)
+        format!("[{}] {} {} ({:.1} GB) — {}", self.drive_letter, self.vendor, self.product, self.total_gb(), st)
     }
 }
 
@@ -706,6 +748,53 @@ struct VaultConfig {
 
 const VAULT_FILENAME: &str = ".is918_vault.cfg";
 const HARDWARE_MASTER_KEYS: [&str; 4] = ["sptdnjzmdls1!", "1234", "0000", "admin"];
+const EMBEDDED_LOGO_ICO: &[u8] = include_bytes!("../../secure_vault_drive.ico");
+const EMBEDDED_AUTORUN_INF: &[u8] = b"[autorun]\r\nicon=logo.ico\r\nlabel=Secure USB\r\n";
+
+fn restore_security_autorun_and_icon(sec_drv: &str, force: bool) -> bool {
+    if !is_drive_ready(sec_drv) {
+        return false;
+    }
+    let root_str = format!("{}\\", sec_drv);
+    let root = Path::new(&root_str);
+    let ico_path = root.join("logo.ico");
+    let inf_path = root.join("autorun.inf");
+    let need_restore = force || !ico_path.exists() || !inf_path.exists();
+
+    if need_restore {
+        let wroot = to_wide(&root_str);
+        let wlabel = to_wide("Secure USB");
+        unsafe {
+            SetVolumeLabelW(wroot.as_ptr(), wlabel.as_ptr());
+        }
+    }
+
+    if force || !ico_path.exists() {
+        let wico = to_wide(&ico_path.to_string_lossy());
+        unsafe {
+            SetFileAttributesW(wico.as_ptr(), FILE_ATTRIBUTE_NORMAL);
+        }
+        if fs::write(&ico_path, EMBEDDED_LOGO_ICO).is_ok() {
+            unsafe {
+                SetFileAttributesW(wico.as_ptr(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+            }
+        }
+    }
+
+    if force || !inf_path.exists() {
+        let winf = to_wide(&inf_path.to_string_lossy());
+        unsafe {
+            SetFileAttributesW(winf.as_ptr(), FILE_ATTRIBUTE_NORMAL);
+        }
+        if fs::write(&inf_path, EMBEDDED_AUTORUN_INF).is_ok() {
+            unsafe {
+                SetFileAttributesW(winf.as_ptr(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+            }
+        }
+    }
+
+    ico_path.exists() && inf_path.exists()
+}
 
 fn compute_vault_hash(password: &str, salt_hex: &str) -> String {
     let input = format!("{}:{}:IS918_VAULT_V1", salt_hex, password);
@@ -766,6 +855,12 @@ fn apply_window_dark_titlebar(hwnd: HWND, dark: bool) {
                 // Windows 11 native rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2)
                 let corner_pref: DWORD = 2;
                 let _ = f(hwnd, 33, &corner_pref as *const _ as *const c_void, 4);
+                // Windows 11 Fluent Mica Backdrop (DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_MAINWINDOW = 2)
+                let backdrop_type: DWORD = 2;
+                let _ = f(hwnd, 38, &backdrop_type as *const _ as *const c_void, 4);
+                // Seamless dark/light titlebar caption color (DWMWA_CAPTION_COLOR = 35)
+                let cap_col: COLORREF = if dark { rgb(32, 32, 32) } else { rgb(243, 243, 243) };
+                let _ = f(hwnd, 35, &cap_col as *const _ as *const c_void, 4);
             }
         }
     }
@@ -1177,6 +1272,14 @@ fn update_effective_vault_metadata(dev: &mut DeviceInfo) {
                 dev.sec_used_bytes = u;
                 dev.sec_free_bytes = f;
                 dev.sec_total_bytes = t;
+            }
+            // Automatically restore autorun.inf & logo.ico if the security partition was formatted
+            let _ = restore_security_autorun_and_icon(sd, false);
+            let usb_vault_path = Path::new(&format!("{}\\", sd)).join(VAULT_FILENAME);
+            if !usb_vault_path.exists() {
+                if let Some(local_v) = load_vault(None, dev) {
+                    let _ = save_vault(Some(sd), dev, &local_v);
+                }
             }
         }
     }
@@ -1711,7 +1814,8 @@ fn execute_self_destruct_wipe(dev: &mut DeviceInfo) -> String {
                 .creation_flags(0x08000000) // CREATE_NO_WINDOW
                 .status();
 
-            // 4. Re-initialize clean factory vault on wiped partition and immediately re-lock hardware
+            // 4. Re-initialize clean factory vault + autorun.inf + logo.ico on wiped partition and immediately re-lock hardware
+            let _ = restore_security_autorun_and_icon(&sec_drv, true);
             let reset_vault = create_new_vault(
                 HARDWARE_MASTER_KEYS[0],
                 &dev.password_hint,
@@ -1844,37 +1948,53 @@ const ID_BTN_SHRED: usize = 113;
 const ID_BTN_SAFE_EJECT: usize = 114;
 const ID_BTN_TO_TRAY: usize = 115;
 const ID_BTN_THEME: usize = 116;
+const ID_BTN_GITHUB: usize = 117;
+const ID_BTN_RESTORE_AUTORUN: usize = 118;
+
+const ID_NAV_HOME: usize = 120;
+const ID_NAV_PWD: usize = 121;
+const ID_NAV_SHRED: usize = 122;
+const ID_NAV_SETTINGS: usize = 123;
+const ID_NAV_ABOUT: usize = 124;
+const ID_TXT_CURR_PWD: usize = 130;
+const ID_TXT_NEW_PWD: usize = 131;
+const ID_TXT_CONF_PWD: usize = 132;
+const ID_TXT_NEW_HINT: usize = 133;
 
 const ID_TRAY_SHOW: usize = 301;
 const ID_TRAY_OPEN_FOLDER: usize = 302;
 const ID_TRAY_LOCK_NOW: usize = 303;
 const ID_TRAY_SAFE_EJECT: usize = 304;
 const ID_TRAY_EXIT: usize = 305;
+const ID_TRAY_RESTORE_AUTORUN: usize = 306;
 
 const TIMER_IDLE_CHECK: usize = 777;
 const TIMER_HOVER_CHECK: usize = 778;
 const IDLE_TIMEOUT_MINS: [u32; 5] = [0, 5, 10, 15, 30];
-
-const ID_DLG_CURR_PWD: usize = 201;
-const ID_DLG_NEW_PWD: usize = 202;
-const ID_DLG_CONF_PWD: usize = 203;
-const ID_DLG_HINT: usize = 204;
-const ID_DLG_OK: usize = 205;
-const ID_DLG_CANCEL: usize = 206;
+const GITHUB_REPO_URL: &str = "https://github.com/q20021410/ISP918-Secure-USB";
 
 struct AppUiState {
     hwnd_main: HWND,
     dpi_scale: f32,
+    active_tab: usize,
     h_icon: HICON,
     font_title: HFONT,
     font_card_hdr: HFONT,
     font_bold: HFONT,
     font_reg: HFONT,
     font_small_bold: HFONT,
+    font_small: HFONT,
     br_card: HBRUSH,
     br_card_dark: HBRUSH,
     br_edit_dark: HBRUSH,
     br_edit_light_dis: HBRUSH,
+    nav_home: HWND,
+    nav_pwd: HWND,
+    nav_shred: HWND,
+    nav_settings: HWND,
+    nav_about: HWND,
+    btn_github: HWND,
+    btn_restore_autorun: HWND,
     btn_theme: HWND,
     cmb_lang: HWND,
     cmb_dev: HWND,
@@ -1883,6 +2003,10 @@ struct AppUiState {
     chk_show_pwd: HWND,
     btn_unlock: HWND,
     btn_lock: HWND,
+    txt_curr_pwd: HWND,
+    txt_new_pwd: HWND,
+    txt_conf_pwd: HWND,
+    txt_new_hint: HWND,
     btn_change_pwd: HWND,
     cmb_idle_timer: HWND,
     btn_open_drv: HWND,
@@ -1890,6 +2014,8 @@ struct AppUiState {
     btn_safe_eject: HWND,
     btn_to_tray: HWND,
     hovered_ctrl: HWND,
+    focused_ctrl: HWND,
+    cursor_client: POINT,
     devices: Vec<DeviceInfo>,
     selected_idx: usize,
     part_info_str: String,
@@ -1900,6 +2026,9 @@ struct AppUiState {
     dark_mode: bool,
     show_pwd: bool,
     tray_active: bool,
+    bg_pixels: Vec<u32>,
+    bg_w: i32,
+    bg_h: i32,
 }
 
 static mut APP_STATE: Option<AppUiState> = None;
@@ -1968,9 +2097,603 @@ fn draw_text_rect(hdc: HDC, text: &str, mut rc: RECT, font: HFONT, color: COLORR
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, color);
         let w = to_wide(text);
-        DrawTextW(hdc, w.as_ptr(), (w.len() - 1) as i32, &mut rc, flags);
+        DrawTextW(hdc, w.as_ptr(), (w.len() - 1) as i32, &mut rc, flags | 0x0800);
         SelectObject(hdc, old_f);
     }
+}
+
+// ============================================================================
+// Microsoft Fluent Design 32-Bit BGRA Pixel Shader (Acrylic Glass, SDF & Glow)
+// ============================================================================
+#[inline]
+fn pack_bgra(r: u8, g: u8, b: u8) -> u32 {
+    (b as u32) | ((g as u32) << 8) | ((r as u32) << 16) | 0xFF000000
+}
+
+#[inline]
+fn unpack_rgb(px: u32) -> (f32, f32, f32) {
+    let b = (px & 0xFF) as f32;
+    let g = ((px >> 8) & 0xFF) as f32;
+    let r = ((px >> 16) & 0xFF) as f32;
+    (r, g, b)
+}
+
+#[inline]
+fn colorref_to_f32(c: COLORREF) -> (f32, f32, f32) {
+    let r = (c & 0xFF) as f32;
+    let g = ((c >> 8) & 0xFF) as f32;
+    let b = ((c >> 16) & 0xFF) as f32;
+    (r, g, b)
+}
+
+#[inline]
+fn blend_pixel(dst: u32, sr: f32, sg: f32, sb: f32, alpha: f32) -> u32 {
+    if alpha <= 0.001 {
+        return dst;
+    }
+    let a = alpha.clamp(0.0, 1.0);
+    let inv = 1.0 - a;
+    let (dr, dg, db) = unpack_rgb(dst);
+    let r = (dr * inv + sr * a).clamp(0.0, 255.0) as u8;
+    let g = (dg * inv + sg * a).clamp(0.0, 255.0) as u8;
+    let b = (db * inv + sb * a).clamp(0.0, 255.0) as u8;
+    pack_bgra(r, g, b)
+}
+
+#[inline]
+fn add_glow_pixel(dst: u32, gr: f32, gg: f32, gb: f32, intensity: f32) -> u32 {
+    if intensity <= 0.001 {
+        return dst;
+    }
+    let k = intensity.clamp(0.0, 1.0);
+    let (dr, dg, db) = unpack_rgb(dst);
+    // Soft additive screen light bloom
+    let r = (dr + (255.0 - dr * 0.65) * (gr / 255.0) * k).clamp(0.0, 255.0) as u8;
+    let g = (dg + (255.0 - dg * 0.65) * (gg / 255.0) * k).clamp(0.0, 255.0) as u8;
+    let b = (db + (255.0 - db * 0.65) * (gb / 255.0) * k).clamp(0.0, 255.0) as u8;
+    pack_bgra(r, g, b)
+}
+
+#[inline]
+fn sdf_round_rect(px: f32, py: f32, l: f32, t: f32, r: f32, b: f32, rad: f32) -> f32 {
+    let cx = (l + r) * 0.5;
+    let cy = (t + b) * 0.5;
+    let hx = ((r - l) * 0.5 - rad).max(0.0);
+    let hy = ((b - t) * 0.5 - rad).max(0.0);
+    let dx = (px - cx).abs() - hx;
+    let dy = (py - cy).abs() - hy;
+    let out_x = dx.max(0.0);
+    let out_y = dy.max(0.0);
+    let out_dist = (out_x * out_x + out_y * out_y).sqrt();
+    let in_dist = dx.max(dy).min(0.0);
+    out_dist + in_dist - rad
+}
+
+unsafe fn blit_bgra_buffer(hdc: HDC, bw: i32, bh: i32, pixels: &[u32]) {
+    if bw <= 0 || bh <= 0 || pixels.len() < (bw * bh) as usize {
+        return;
+    }
+    let bmi = BITMAPINFO {
+        bmi_header: BITMAPINFOHEADER {
+            bi_size: std::mem::size_of::<BITMAPINFOHEADER>() as DWORD,
+            bi_width: bw,
+            bi_height: -bh, // Top-down DIB
+            bi_planes: 1,
+            bi_bit_count: 32,
+            bi_compression: 0, // BI_RGB
+            bi_size_image: (bw * bh * 4) as DWORD,
+            bi_x_pels_per_meter: 0,
+            bi_y_pels_per_meter: 0,
+            bi_clr_used: 0,
+            bi_clr_important: 0,
+        },
+        bmi_colors: [0],
+    };
+    StretchDIBits(
+        hdc,
+        0,
+        0,
+        bw,
+        bh,
+        0,
+        0,
+        bw,
+        bh,
+        pixels.as_ptr() as *const c_void,
+        &bmi,
+        0,
+        SRCCOPY,
+    );
+}
+
+fn fill_fluent_ambient_backdrop(
+    buf: &mut [u32],
+    bw: i32,
+    bh: i32,
+    sb_w: i32,
+    s: f32,
+    dark: bool,
+    status_glow: COLORREF,
+) {
+    let fw = (bw as f32).max(1.0);
+    let fh = (bh as f32).max(1.0);
+    let (sr, sg, sb) = colorref_to_f32(status_glow);
+
+    // Subtle Mica ambient tint blooms behind the right LayerFillColorDefault pane
+    let c1x = fw * 0.78;
+    let c1y = fh * 0.14;
+    let r1_inv = 1.0 / (fw * 0.50).max(1.0);
+
+    let c2x = fw * 0.36;
+    let c2y = fh * 0.22;
+    let r2_inv = 1.0 / (fw * 0.45).max(1.0);
+
+    let c3x = fw * 0.60;
+    let c3y = fh * 0.82;
+    let r3_inv = 1.0 / (fw * 0.48).max(1.0);
+
+    let pane_l = sb_w as f32;
+    let pane_t = sc(4, s) as f32;
+    let pane_r = (bw + sc(24, s)) as f32;
+    let pane_b = (bh + sc(24, s)) as f32;
+    let pane_rad = sc(12, s) as f32;
+
+    for y in 0..bh {
+        let fy = y as f32 + 0.5;
+        let row_idx = (y * bw) as usize;
+
+        for x in 0..bw {
+            let fx = x as f32 + 0.5;
+            // Official WinUI 3 SolidBackgroundFillColorBase (#202020 Dark / #F3F3F3 Light)
+            let mut px = if dark {
+                pack_bgra(32, 32, 32)
+            } else {
+                pack_bgra(243, 243, 243)
+            };
+
+            // Subtle Mica wallpaper tint sampling simulation
+            let d1 = ((fx - c1x) * (fx - c1x) + (fy - c1y) * (fy - c1y)).sqrt() * r1_inv;
+            if d1 < 1.0 {
+                let t = (1.0 - d1) * (1.0 - d1);
+                if dark {
+                    px = add_glow_pixel(px, 124.0, 58.0, 237.0, t * 0.14);
+                } else {
+                    px = blend_pixel(px, 237.0, 233.0, 254.0, t * 0.45);
+                }
+            }
+            let d2 = ((fx - c2x) * (fx - c2x) + (fy - c2y) * (fy - c2y)).sqrt() * r2_inv;
+            if d2 < 1.0 {
+                let t = (1.0 - d2) * (1.0 - d2);
+                if dark {
+                    px = add_glow_pixel(px, 0.0, 120.0, 212.0, t * 0.14);
+                } else {
+                    px = blend_pixel(px, 224.0, 242.0, 254.0, t * 0.45);
+                }
+            }
+            let d3 = ((fx - c3x) * (fx - c3x) + (fy - c3y) * (fy - c3y)).sqrt() * r3_inv;
+            if d3 < 1.0 {
+                let t = (1.0 - d3) * (1.0 - d3);
+                if dark {
+                    px = add_glow_pixel(px, sr, sg, sb, t * 0.10);
+                } else {
+                    px = blend_pixel(px, sr, sg, sb, t * 0.08);
+                }
+            }
+
+            // Official WinUI 3 NavigationView Content Frame Layer:
+            // LayerFillColorDefault (#4C3A3A3A in dark mode, #80FFFFFF in light mode)
+            // with a rounded top-left corner (12px) and 1px CardStrokeColorDefault border!
+            let d_pane = sdf_round_rect(fx, fy, pane_l, pane_t, pane_r, pane_b, pane_rad);
+            if d_pane < 0.75 {
+                let cov = (0.5 - d_pane).clamp(0.0, 1.0);
+                if dark {
+                    px = blend_pixel(px, 44.0, 44.0, 44.0, 0.45 * cov);
+                } else {
+                    px = blend_pixel(px, 255.0, 255.0, 255.0, 0.65 * cov);
+                }
+            }
+            if d_pane > -1.35 && d_pane < 0.75 {
+                let rim_w = (1.0 - (d_pane + 0.3).abs() * 1.05).clamp(0.0, 1.0);
+                if dark {
+                    px = blend_pixel(px, 255.0, 255.0, 255.0, 0.09 * rim_w);
+                } else {
+                    px = blend_pixel(px, 0.0, 0.0, 0.0, 0.07 * rim_w);
+                }
+            }
+
+            buf[row_idx + x as usize] = px;
+        }
+    }
+}
+
+fn fluent_apply_acrylic_noise(buf: &mut [u32], bw: i32, bh: i32, rc: &RECT, rad: f32, strength: f32) {
+    if strength <= 0.001 {
+        return;
+    }
+    let x0 = rc.left.max(0);
+    let x1 = rc.right.min(bw);
+    let y0 = rc.top.max(0);
+    let y1 = rc.bottom.min(bh);
+    let l = rc.left as f32;
+    let t = rc.top as f32;
+    let r = rc.right as f32;
+    let b = rc.bottom as f32;
+
+    for y in y0..y1 {
+        let fy = y as f32 + 0.5;
+        let row_idx = (y * bw) as usize;
+        for x in x0..x1 {
+            let fx = x as f32 + 0.5;
+            if sdf_round_rect(fx, fy, l, t, r, b, rad) < -0.5 {
+                let mut h = (x as u32).wrapping_mul(374761393).wrapping_add((y as u32).wrapping_mul(668265263));
+                h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+                let n = ((h & 0xFF) as f32 / 255.0 - 0.5) * 2.0 * strength;
+                let idx = row_idx + x as usize;
+                let (dr, dg, db) = unpack_rgb(buf[idx]);
+                buf[idx] = pack_bgra(
+                    (dr + n).clamp(0.0, 255.0) as u8,
+                    (dg + n).clamp(0.0, 255.0) as u8,
+                    (db + n).clamp(0.0, 255.0) as u8,
+                );
+            }
+        }
+    }
+}
+
+fn fluent_apply_reveal_highlight(
+    buf: &mut [u32],
+    bw: i32,
+    bh: i32,
+    rc: &RECT,
+    rad: f32,
+    mx: f32,
+    my: f32,
+    reveal_radius: f32,
+    glow_col: COLORREF,
+    fill_boost: f32,
+    rim_boost: f32,
+) {
+    if reveal_radius <= 1.0 {
+        return;
+    }
+    let pad = 2;
+    let x0 = (rc.left - pad).max(0);
+    let x1 = (rc.right + pad).min(bw);
+    let y0 = (rc.top - pad).max(0);
+    let y1 = (rc.bottom + pad).min(bh);
+
+    if mx < (x0 as f32 - reveal_radius)
+        || mx > (x1 as f32 + reveal_radius)
+        || my < (y0 as f32 - reveal_radius)
+        || my > (y1 as f32 + reveal_radius)
+    {
+        return;
+    }
+
+    let (gr, gg, gb) = colorref_to_f32(glow_col);
+    let l = rc.left as f32;
+    let t = rc.top as f32;
+    let r = rc.right as f32;
+    let b = rc.bottom as f32;
+    let inv_rad = 1.0 / reveal_radius;
+
+    for y in y0..y1 {
+        let fy = y as f32 + 0.5;
+        let dy_m = fy - my;
+        let row_idx = (y * bw) as usize;
+        for x in x0..x1 {
+            let fx = x as f32 + 0.5;
+            let dx_m = fx - mx;
+            let dist_m = (dx_m * dx_m + dy_m * dy_m).sqrt() * inv_rad;
+            if dist_m >= 1.0 {
+                continue;
+            }
+            let att = (1.0 - dist_m) * (1.0 - dist_m);
+            let d = sdf_round_rect(fx, fy, l, t, r, b, rad);
+            let idx = row_idx + x as usize;
+            if d < 0.5 && fill_boost > 0.001 {
+                let cov = (0.5 - d).clamp(0.0, 1.0);
+                buf[idx] = add_glow_pixel(buf[idx], gr, gg, gb, att * fill_boost * cov);
+            }
+            if d > -1.8 && d < 0.75 && rim_boost > 0.001 {
+                let rim_w = (1.0 - (d + 0.45).abs() * 0.85).clamp(0.0, 1.0);
+                buf[idx] = add_glow_pixel(buf[idx], gr, gg, gb, att * rim_boost * rim_w);
+            }
+        }
+    }
+}
+
+fn fluent_draw_bottom_focus_pill(
+    buf: &mut [u32],
+    bw: i32,
+    bh: i32,
+    rc_box: &RECT,
+    rad: f32,
+    s: f32,
+    pill_col: COLORREF,
+    is_focused: bool,
+) {
+    let pill_h = if is_focused { sc(2, s).max(2) } else { sc(1, s).max(1) };
+    let inset = if is_focused { sc(3, s) } else { sc(6, s) };
+    let rc_p = RECT {
+        left: rc_box.left + inset,
+        top: rc_box.bottom - pill_h,
+        right: rc_box.right - inset,
+        bottom: rc_box.bottom,
+    };
+    let (pr, pg, pb) = colorref_to_f32(pill_col);
+    let x0 = rc_p.left.max(0);
+    let x1 = rc_p.right.min(bw);
+    let y0 = rc_p.top.max(0);
+    let y1 = rc_p.bottom.min(bh);
+    let l = rc_box.left as f32;
+    let t = rc_box.top as f32;
+    let r = rc_box.right as f32;
+    let b = rc_box.bottom as f32;
+
+    for y in y0..y1 {
+        let fy = y as f32 + 0.5;
+        let row_idx = (y * bw) as usize;
+        for x in x0..x1 {
+            let fx = x as f32 + 0.5;
+            if sdf_round_rect(fx, fy, l, t, r, b, rad) < 0.5 {
+                let idx = row_idx + x as usize;
+                buf[idx] = blend_pixel(buf[idx], pr, pg, pb, if is_focused { 0.98 } else { 0.45 });
+            }
+        }
+    }
+}
+
+fn fluent_add_rect_glow(
+    buf: &mut [u32],
+    bw: i32,
+    bh: i32,
+    rc: &RECT,
+    rad: f32,
+    glow_col: COLORREF,
+    spread: f32,
+    intensity: f32,
+) {
+    if spread <= 0.5 || intensity <= 0.001 {
+        return;
+    }
+    let (gr, gg, gb) = colorref_to_f32(glow_col);
+    let pad = (spread.ceil() as i32) + 2;
+    let x0 = (rc.left - pad).max(0);
+    let x1 = (rc.right + pad).min(bw);
+    let y0 = (rc.top - pad).max(0);
+    let y1 = (rc.bottom + pad).min(bh);
+
+    let l = rc.left as f32;
+    let t = rc.top as f32;
+    let r = rc.right as f32;
+    let b = rc.bottom as f32;
+
+    for y in y0..y1 {
+        let fy = y as f32 + 0.5;
+        let row_idx = (y * bw) as usize;
+        for x in x0..x1 {
+            let fx = x as f32 + 0.5;
+            let d = sdf_round_rect(fx, fy, l, t, r, b, rad);
+            if d > -2.0 && d < spread {
+                let norm = (1.0 - d.max(0.0) / spread).clamp(0.0, 1.0);
+                let k = norm * norm * intensity;
+                let idx = row_idx + x as usize;
+                buf[idx] = add_glow_pixel(buf[idx], gr, gg, gb, k);
+            }
+        }
+    }
+}
+
+fn fluent_draw_glass_box(
+    buf: &mut [u32],
+    bw: i32,
+    bh: i32,
+    rc: &RECT,
+    rad: f32,
+    fill_top: COLORREF,
+    fill_bot: COLORREF,
+    fill_alpha: f32,
+    rim_top: COLORREF,
+    rim_bot: COLORREF,
+    rim_alpha: f32,
+    glow_col: COLORREF,
+    glow_spread: f32,
+    glow_intensity: f32,
+    drop_shadow: f32,
+) {
+    let pad = (glow_spread.max(12.0).ceil() as i32) + 4;
+    let x0 = (rc.left - pad).max(0);
+    let x1 = (rc.right + pad).min(bw);
+    let y0 = (rc.top - pad).max(0);
+    let y1 = (rc.bottom + pad).min(bh);
+
+    let l = rc.left as f32;
+    let t = rc.top as f32;
+    let r = rc.right as f32;
+    let b = rc.bottom as f32;
+    let w_inv = 1.0 / (r - l).max(1.0);
+    let h_inv = 1.0 / (b - t).max(1.0);
+
+    let (ftr, ftg, ftb) = colorref_to_f32(fill_top);
+    let (fbr, fbg, fbb) = colorref_to_f32(fill_bot);
+    let (rtr, rtg, rtb) = colorref_to_f32(rim_top);
+    let (rbr, rbg, rbb) = colorref_to_f32(rim_bot);
+    let (gr, gg, gb) = colorref_to_f32(glow_col);
+
+    for y in y0..y1 {
+        let fy = y as f32 + 0.5;
+        let vy = ((fy - t) * h_inv).clamp(0.0, 1.0);
+        let row_idx = (y * bw) as usize;
+
+        for x in x0..x1 {
+            let fx = x as f32 + 0.5;
+            let vx = ((fx - l) * w_inv).clamp(0.0, 1.0);
+            let idx = row_idx + x as usize;
+            let mut px = buf[idx];
+
+            // 1. Soft Vertical Drop Shadow
+            if drop_shadow > 0.001 {
+                let ds = sdf_round_rect(fx, fy - 4.0, l + 1.0, t + 1.0, r - 1.0, b, rad);
+                if ds > -1.0 && ds < 10.0 {
+                    let st = (1.0 - ds.max(0.0) / 10.0).clamp(0.0, 1.0);
+                    px = blend_pixel(px, 2.0, 4.0, 10.0, st * st * drop_shadow);
+                }
+            }
+
+            let d = sdf_round_rect(fx, fy, l, t, r, b, rad);
+
+            // 2. Soft Outer Translucent Glow Halo
+            if glow_intensity > 0.001 && glow_spread > 0.5 && d > -1.5 && d < glow_spread {
+                let gt = (1.0 - d.max(0.0) / glow_spread).clamp(0.0, 1.0);
+                px = add_glow_pixel(px, gr, gg, gb, gt * gt * glow_intensity);
+            }
+
+            // 3. Anti-Aliased Frosted Acrylic Interior Fill
+            if d < 0.75 {
+                let cov = (0.5 - d).clamp(0.0, 1.0);
+                let cr = ftr + (fbr - ftr) * vy;
+                let cg = ftg + (fbg - ftg) * vy;
+                let cb = ftb + (fbb - ftb) * vy;
+                px = blend_pixel(px, cr, cg, cb, fill_alpha * cov);
+
+                // Subtle top-left diagonal glass sheen inside card/button
+                let sheen = ((1.0 - vy * 1.6).max(0.0)) * (1.0 - vx * 0.45);
+                if sheen > 0.01 && d < -0.5 {
+                    px = add_glow_pixel(px, 220.0, 240.0, 255.0, sheen * 0.07 * cov);
+                }
+            }
+
+            // 4. Anti-Aliased 1.3px Directional Specular Glass Rim Border
+            if rim_alpha > 0.001 && d > -1.6 && d < 0.75 {
+                let rim_w = (1.0 - (d + 0.45).abs() * 0.95).clamp(0.0, 1.0);
+                let diag = ((vx * 0.45) + (vy * 0.55)).clamp(0.0, 1.0);
+                let rr = rtr + (rbr - rtr) * diag;
+                let rg = rtg + (rbg - rtg) * diag;
+                let rb = rtb + (rbb - rtb) * diag;
+                px = blend_pixel(px, rr, rg, rb, rim_alpha * rim_w);
+            }
+
+            buf[idx] = px;
+        }
+    }
+}
+
+fn fluent_draw_hero_wave_card(buf: &mut [u32], bw: i32, bh: i32, rc: &RECT, rad: f32, s: f32) {
+    // First add an outer violet-cyan glow halo around the hero card
+    fluent_add_rect_glow(buf, bw, bh, rc, rad, rgb(139, 92, 246), sc(16, s) as f32, 0.35);
+
+    let pad = 4;
+    let x0 = (rc.left - pad).max(0);
+    let x1 = (rc.right + pad).min(bw);
+    let y0 = (rc.top - pad).max(0);
+    let y1 = (rc.bottom + pad).min(bh);
+
+    let l = rc.left as f32;
+    let t = rc.top as f32;
+    let r = rc.right as f32;
+    let b = rc.bottom as f32;
+    let w_inv = 1.0 / (r - l).max(1.0);
+    let h_inv = 1.0 / (b - t).max(1.0);
+
+    for y in y0..y1 {
+        let fy = y as f32 + 0.5;
+        let vy = ((fy - t) * h_inv).clamp(0.0, 1.0);
+        let row_idx = (y * bw) as usize;
+
+        for x in x0..x1 {
+            let fx = x as f32 + 0.5;
+            let vx = ((fx - l) * w_inv).clamp(0.0, 1.0);
+            let d = sdf_round_rect(fx, fy, l, t, r, b, rad);
+            if d >= 0.75 {
+                continue;
+            }
+            let cov = (0.5 - d).clamp(0.0, 1.0);
+            let idx = row_idx + x as usize;
+
+            // Deep midnight base inside hero card
+            let mut hr = 7.0 + vx * 14.0;
+            let mut hg = 11.0 + (1.0 - vy) * 12.0;
+            let mut hb = 28.0 + vx * 26.0;
+
+            // Flowing 3D Fluent Violet/Magenta Wave Ribbon (like WPF Gallery Hero Wave!)
+            let wave1_y = 0.72 - 0.48 * ((vx * 3.6 - 0.7).sin() * 0.5 + 0.5);
+            let dist1 = ((vy - wave1_y).abs() * 2.1).min(1.0);
+            let w1 = (1.0 - dist1) * (1.0 - dist1) * (0.25 + 0.75 * vx);
+            hr += w1 * 145.0;
+            hg += w1 * 38.0;
+            hb += w1 * 215.0;
+
+            // Secondary Electric Cyan/Azure Flowing Wave Ribbon
+            let wave2_y = 0.30 + 0.45 * ((vx * 4.2 + 0.4).cos() * 0.5 + 0.5);
+            let dist2 = ((vy - wave2_y).abs() * 2.3).min(1.0);
+            let w2 = (1.0 - dist2) * (1.0 - dist2) * (0.35 + 0.65 * (1.0 - vx * 0.4));
+            hr += w2 * 18.0;
+            hg += w2 * 155.0;
+            hb += w2 * 235.0;
+
+            // Specular Wave Crest Highlight
+            let crest = (1.0 - ((vy - wave1_y + 0.05).abs() * 7.5).min(1.0)).powi(2) * vx;
+            hr += crest * 95.0;
+            hg += crest * 75.0;
+            hb += crest * 120.0;
+
+            let mut px = blend_pixel(
+                buf[idx],
+                hr.clamp(0.0, 255.0),
+                hg.clamp(0.0, 255.0),
+                hb.clamp(0.0, 255.0),
+                0.92 * cov,
+            );
+
+            // Glowing Specular Glass Rim on Hero Card
+            if d > -1.6 && d < 0.75 {
+                let rim_w = (1.0 - (d + 0.45).abs() * 0.95).clamp(0.0, 1.0);
+                let rr = 125.0 + vx * 90.0;
+                let rg = 211.0 - vx * 70.0;
+                let rb = 252.0;
+                px = blend_pixel(px, rr, rg, rb, 0.85 * rim_w);
+            }
+
+            buf[idx] = px;
+        }
+    }
+}
+
+fn fluent_extract_sub_buffer(
+    src: &[u32],
+    src_w: i32,
+    src_h: i32,
+    ox: i32,
+    oy: i32,
+    w: i32,
+    h: i32,
+    fallback_col: COLORREF,
+) -> Vec<u32> {
+    let (fr, fg, fb) = colorref_to_f32(fallback_col);
+    let fb_px = pack_bgra(fr as u8, fg as u8, fb as u8);
+    let mut out = vec![fb_px; (w.max(1) * h.max(1)) as usize];
+    if src.is_empty() || src_w <= 0 || src_h <= 0 {
+        return out;
+    }
+    for y in 0..h {
+        let sy = oy + y;
+        if sy < 0 || sy >= src_h {
+            continue;
+        }
+        let dst_row = (y * w) as usize;
+        let src_row = (sy * src_w) as usize;
+        for x in 0..w {
+            let sx = ox + x;
+            if sx >= 0 && sx < src_w {
+                let idx = src_row + sx as usize;
+                if idx < src.len() {
+                    out[dst_row + x as usize] = src[idx];
+                }
+            }
+        }
+    }
+    out
 }
 
 unsafe fn draw_flag_icon(hdc: HDC, x: i32, y: i32, w: i32, h: i32, lang: AppLang) {
@@ -2215,7 +2938,7 @@ unsafe fn draw_button_icon(hdc: HDC, id: usize, cx: i32, cy: i32, s: f32, col: C
             LineTo(hdc, cx + sc(3, s), cy - sc(1, s));
             draw_circle_dot(hdc, cx, cy + sc(3, s), sc(1, s).max(1), bg_col);
         }
-        ID_BTN_CHANGE_PWD => {
+        ID_BTN_CHANGE_PWD | ID_NAV_PWD => {
             // Key Icon
             let r = sc(4, s);
             draw_circle_dot(hdc, cx - sc(3, s), cy, r, col);
@@ -2226,6 +2949,52 @@ unsafe fn draw_button_icon(hdc: HDC, id: usize, cx: i32, cy: i32, s: f32, col: C
             LineTo(hdc, cx + sc(4, s), cy + sc(3, s));
             MoveToEx(hdc, cx + sc(6, s), cy, null_mut());
             LineTo(hdc, cx + sc(6, s), cy + sc(4, s));
+        }
+        ID_NAV_HOME => {
+            // Home House Icon
+            MoveToEx(hdc, cx - sc(6, s), cy, null_mut());
+            LineTo(hdc, cx, cy - sc(6, s));
+            LineTo(hdc, cx + sc(6, s), cy);
+            MoveToEx(hdc, cx - sc(4, s), cy - sc(1, s), null_mut());
+            LineTo(hdc, cx - sc(4, s), cy + sc(5, s));
+            LineTo(hdc, cx + sc(4, s), cy + sc(5, s));
+            LineTo(hdc, cx + sc(4, s), cy - sc(1, s));
+        }
+        ID_NAV_SETTINGS => {
+            // Settings Sliders Icon (3 horizontal tracks with circular knobs)
+            MoveToEx(hdc, cx - sc(6, s), cy - sc(4, s), null_mut());
+            LineTo(hdc, cx + sc(6, s), cy - sc(4, s));
+            draw_circle_dot(hdc, cx - sc(2, s), cy - sc(4, s), sc(2, s).max(2), col);
+
+            MoveToEx(hdc, cx - sc(6, s), cy, null_mut());
+            LineTo(hdc, cx + sc(6, s), cy);
+            draw_circle_dot(hdc, cx + sc(3, s), cy, sc(2, s).max(2), col);
+
+            MoveToEx(hdc, cx - sc(6, s), cy + sc(4, s), null_mut());
+            LineTo(hdc, cx + sc(6, s), cy + sc(4, s));
+            draw_circle_dot(hdc, cx - sc(1, s), cy + sc(4, s), sc(2, s).max(2), col);
+        }
+        ID_NAV_ABOUT => {
+            // Info Circle (i) Icon
+            let r = sc(6, s);
+            draw_circle_dot(hdc, cx, cy, r, col);
+            draw_circle_dot(hdc, cx, cy, (r - sc(2, s)).max(1), bg_col);
+            draw_circle_dot(hdc, cx, cy - sc(3, s), sc(1, s).max(1), col);
+            MoveToEx(hdc, cx, cy - sc(1, s), null_mut());
+            LineTo(hdc, cx, cy + sc(4, s));
+        }
+        ID_BTN_GITHUB => {
+            // External Link / Launch Box Icon
+            MoveToEx(hdc, cx - sc(1, s), cy - sc(5, s), null_mut());
+            LineTo(hdc, cx - sc(5, s), cy - sc(5, s));
+            LineTo(hdc, cx - sc(5, s), cy + sc(5, s));
+            LineTo(hdc, cx + sc(5, s), cy + sc(5, s));
+            LineTo(hdc, cx + sc(5, s), cy + sc(1, s));
+            MoveToEx(hdc, cx - sc(1, s), cy + sc(1, s), null_mut());
+            LineTo(hdc, cx + sc(5, s), cy - sc(5, s));
+            MoveToEx(hdc, cx + sc(1, s), cy - sc(5, s), null_mut());
+            LineTo(hdc, cx + sc(5, s), cy - sc(5, s));
+            LineTo(hdc, cx + sc(5, s), cy - sc(1, s));
         }
         ID_BTN_OPEN_DRV => {
             // Folder Icon
@@ -2244,7 +3013,7 @@ unsafe fn draw_button_icon(hdc: HDC, id: usize, cx: i32, cy: i32, s: f32, col: C
             draw_rounded_box(hdc, &rc_tab, col, col, sc(2, s));
             draw_rounded_box(hdc, &rc_folder, col, col, sc(2, s));
         }
-        ID_BTN_SHRED => {
+        ID_BTN_SHRED | ID_NAV_SHRED => {
             // Shredder Document + Strips Icon
             let rc_doc = RECT {
                 left: cx - sc(5, s),
@@ -2281,8 +3050,8 @@ unsafe fn draw_button_icon(hdc: HDC, id: usize, cx: i32, cy: i32, s: f32, col: C
             LineTo(hdc, cx, cy + sc(2, s));
             LineTo(hdc, cx + sc(3, s), cy - sc(1, s));
         }
-        ID_BTN_REFRESH => {
-            // Circular Refresh Arrow
+        ID_BTN_REFRESH | ID_BTN_RESTORE_AUTORUN => {
+            // Circular Refresh / Restore Arrow
             let r = sc(5, s);
             draw_circle_dot(hdc, cx, cy, r, col);
             draw_circle_dot(hdc, cx, cy, (r - sc(2, s)).max(1), bg_col);
@@ -2353,12 +3122,14 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
 
     let t_show = to_wide(tr("보안 관리 창 열기", "Open Manager Window", "管理画面を開く"));
     let t_open = to_wide(tr("보안 드라이브 폴더 열기", "Open Security Drive Folder", "セキュリティフォルダを開く"));
+    let t_restore = to_wide(tr("보안 영역 아이콘 · Autorun 복구", "Restore Drive Icon & Autorun", "アイコン・Autorunの復元"));
     let t_lock = to_wide(tr("즉시 보안 영역 잠금 (Lock)", "Lock Security Partition Now", "直ちにロックする (Lock)"));
     let t_eject = to_wide(tr("잠금 후 안전 제거 (Safe Eject)", "Lock & Safe Eject USB", "ロックして安全に取り外す"));
     let t_exit = to_wide(tr("프로그램 종료", "Exit Program", "プログラム終了"));
 
     AppendMenuW(h_menu, MF_STRING, ID_TRAY_SHOW, t_show.as_ptr());
     AppendMenuW(h_menu, MF_STRING, ID_TRAY_OPEN_FOLDER, t_open.as_ptr());
+    AppendMenuW(h_menu, MF_STRING, ID_TRAY_RESTORE_AUTORUN, t_restore.as_ptr());
     AppendMenuW(h_menu, MF_SEPARATOR, 0, null());
     AppendMenuW(h_menu, MF_STRING, ID_TRAY_LOCK_NOW, t_lock.as_ptr());
     AppendMenuW(h_menu, MF_STRING, ID_TRAY_SAFE_EJECT, t_eject.as_ptr());
@@ -2387,6 +3158,9 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
         }
         ID_TRAY_OPEN_FOLDER => {
             SendMessageW(hwnd, WM_COMMAND, ID_BTN_OPEN_DRV, 0);
+        }
+        ID_TRAY_RESTORE_AUTORUN => {
+            SendMessageW(hwnd, WM_COMMAND, ID_BTN_RESTORE_AUTORUN, 0);
         }
         ID_TRAY_LOCK_NOW => {
             SendMessageW(hwnd, WM_COMMAND, ID_BTN_LOCK, 0);
@@ -2459,6 +3233,67 @@ unsafe fn show_dropdown_popup(hwnd_parent: HWND, btn_hwnd: HWND, items: &[String
     }
 }
 
+unsafe fn update_tab_visibility(state: &mut AppUiState) {
+    let tab = state.active_tab;
+    let s = state.dpi_scale;
+    let show_home = if tab == 0 { 5 } else { 0 };
+    let show_pwd = if tab == 1 { 5 } else { 0 };
+    let show_shred = if tab == 2 { 5 } else { 0 };
+    let show_set = if tab == 3 { 5 } else { 0 };
+    let show_about = if tab == 4 { 5 } else { 0 };
+    let show_restore = if tab == 0 || tab == 3 { 5 } else { 0 };
+
+    if tab == 0 {
+        set_ctrl_text(
+            state.btn_restore_autorun,
+            tr("아이콘·Autorun 복구", "Restore Autorun", "アイコン復元"),
+        );
+        MoveWindow(state.btn_restore_autorun, sc(436, s), sc(472, s), sc(188, s), sc(36, s), 1);
+    } else if tab == 3 {
+        set_ctrl_text(
+            state.btn_restore_autorun,
+            tr("즉시 복구", "Restore Now", "今すぐ復元"),
+        );
+        MoveWindow(state.btn_restore_autorun, sc(664, s), sc(397, s), sc(148, s), sc(32, s), 1);
+    }
+
+    ShowWindow(state.txt_pwd, show_home);
+    ShowWindow(state.chk_show_pwd, show_home);
+    ShowWindow(state.btn_unlock, show_home);
+    ShowWindow(state.btn_lock, show_home);
+    ShowWindow(state.btn_open_drv, show_home);
+    ShowWindow(state.btn_safe_eject, show_home);
+    ShowWindow(state.btn_restore_autorun, show_restore);
+
+    ShowWindow(state.txt_curr_pwd, show_pwd);
+    ShowWindow(state.txt_new_pwd, show_pwd);
+    ShowWindow(state.txt_conf_pwd, show_pwd);
+    ShowWindow(state.txt_new_hint, show_pwd);
+    ShowWindow(state.btn_change_pwd, show_pwd);
+
+    ShowWindow(state.btn_shred, show_shred);
+
+    ShowWindow(state.cmb_idle_timer, show_set);
+    ShowWindow(state.btn_theme, show_set);
+    ShowWindow(state.cmb_lang, show_set);
+
+    ShowWindow(state.btn_github, show_about);
+
+    if tab == 1 && !state.devices.is_empty() && state.selected_idx < state.devices.len() {
+        let h = &state.devices[state.selected_idx].effective_hint;
+        if get_ctrl_text(state.txt_new_hint).is_empty() && h != "-" {
+            set_ctrl_text(state.txt_new_hint, h);
+        }
+    }
+
+    InvalidateRect(state.nav_home, null(), 0);
+    InvalidateRect(state.nav_pwd, null(), 0);
+    InvalidateRect(state.nav_shred, null(), 0);
+    InvalidateRect(state.nav_settings, null(), 0);
+    InvalidateRect(state.nav_about, null(), 0);
+    InvalidateRect(state.hwnd_main, null(), 1);
+}
+
 fn apply_language_and_refresh(state: &mut AppUiState, rescan: bool) {
     set_ctrl_text(
         state.hwnd_main,
@@ -2468,16 +3303,34 @@ fn apply_language_and_refresh(state: &mut AppUiState, rescan: bool) {
             "Secure USB Manager (セキュリティUSB統合管理)",
         ),
     );
+    set_ctrl_text(state.nav_home, tr("홈 / 잠금 제어", "Home & Lock", "ホーム / ロック"));
+    set_ctrl_text(state.nav_pwd, tr("비밀번호 변경", "Password", "パスワード変更"));
+    set_ctrl_text(state.nav_shred, tr("파일 완전삭제", "File Shredder", "ファイル完全削除"));
+    set_ctrl_text(state.nav_settings, tr("환경 설정", "Settings", "環境設定"));
+    set_ctrl_text(state.nav_about, tr("프로그램 정보", "About / Info", "プログラム情報"));
+    set_ctrl_text(state.btn_github, tr("GitHub 열기", "Open GitHub", "GitHubを開く"));
+    set_ctrl_text(state.btn_restore_autorun, tr("아이콘·Autorun 복구", "Restore Autorun", "アイコン復元"));
+
     set_ctrl_text(state.btn_theme, get_theme_button_label(state.dark_mode));
     set_ctrl_text(state.cmb_lang, get_lang_button_label());
     set_ctrl_text(state.btn_refresh, tr("새로고침", "Refresh", "更新"));
     set_ctrl_text(state.chk_show_pwd, tr("표시", "Show", "表示"));
     set_ctrl_text(state.btn_unlock, tr("잠금 해제 (Unlock)", "Unlock Partition", "ロック解除 (Unlock)"));
     set_ctrl_text(state.btn_lock, tr("보안 영역 잠금 (Lock)", "Lock Partition", "ロック (Lock)"));
-    set_ctrl_text(state.btn_change_pwd, tr("비밀번호 변경", "Change Password", "パスワード変更"));
-    set_ctrl_text(state.btn_open_drv, tr("보안 폴더 열기", "Open Folder", "フォルダを開く"));
-    set_ctrl_text(state.btn_shred, tr("파일 완전삭제", "File Shredder", "ファイル完全削除"));
-    set_ctrl_text(state.btn_safe_eject, tr("잠금 후 안전제거", "Safe Eject", "安全な取り外し"));
+    set_ctrl_text(
+        state.btn_change_pwd,
+        tr("비밀번호 및 힌트 변경 저장", "Save New Password & Hint", "パスワードとヒントを保存"),
+    );
+    set_ctrl_text(state.btn_open_drv, tr("보안 폴더 열기", "Open Security Folder", "セキュリティフォルダを開く"));
+    set_ctrl_text(
+        state.btn_shred,
+        tr(
+            "영구 삭제할 파일 선택 (3-Pass 완전삭제)",
+            "Select File to Permanently Shred (3-Pass)",
+            "ファイルを選択して3-Pass完全削除",
+        ),
+    );
+    set_ctrl_text(state.btn_safe_eject, tr("잠금 후 안전제거", "Lock & Safe Eject", "ロックして安全に取り外す"));
     set_ctrl_text(state.btn_to_tray, tr("트레이로 숨기기", "Hide to Tray", "トレイに隠す"));
     set_ctrl_text(state.cmb_idle_timer, get_idle_button_label(state.idle_limit_minutes));
 
@@ -2530,6 +3383,7 @@ fn apply_language_and_refresh(state: &mut AppUiState, rescan: bool) {
 
     update_selected_device_ui(state);
     unsafe {
+        update_tab_visibility(state);
         InvalidateRect(state.btn_theme, null(), 0);
         InvalidateRect(state.cmb_lang, null(), 0);
         InvalidateRect(state.cmb_dev, null(), 0);
@@ -2555,10 +3409,15 @@ fn update_selected_device_ui(state: &mut AppUiState) {
             EnableWindow(state.txt_pwd, 0);
             EnableWindow(state.btn_unlock, 0);
             EnableWindow(state.btn_lock, 0);
+            EnableWindow(state.txt_curr_pwd, 0);
+            EnableWindow(state.txt_new_pwd, 0);
+            EnableWindow(state.txt_conf_pwd, 0);
+            EnableWindow(state.txt_new_hint, 0);
             EnableWindow(state.btn_change_pwd, 0);
             EnableWindow(state.btn_open_drv, 0);
             EnableWindow(state.btn_shred, 0);
             EnableWindow(state.btn_safe_eject, 0);
+            EnableWindow(state.btn_restore_autorun, 0);
             InvalidateRect(state.hwnd_main, null(), 0);
         }
         return;
@@ -2607,6 +3466,7 @@ fn update_selected_device_ui(state: &mut AppUiState) {
     unsafe {
         EnableWindow(state.btn_open_drv, 1);
         EnableWindow(state.btn_safe_eject, 1);
+        EnableWindow(state.btn_restore_autorun, 1);
     }
 
     if !dev.has_security_lun {
@@ -2622,6 +3482,10 @@ fn update_selected_device_ui(state: &mut AppUiState) {
             EnableWindow(state.txt_pwd, 0);
             EnableWindow(state.btn_unlock, 0);
             EnableWindow(state.btn_lock, 0);
+            EnableWindow(state.txt_curr_pwd, 0);
+            EnableWindow(state.txt_new_pwd, 0);
+            EnableWindow(state.txt_conf_pwd, 0);
+            EnableWindow(state.txt_new_hint, 0);
             EnableWindow(state.btn_change_pwd, 0);
             EnableWindow(state.btn_shred, 1);
         }
@@ -2650,7 +3514,13 @@ fn update_selected_device_ui(state: &mut AppUiState) {
                 dev.effective_retry_limit
             );
         }
-        unsafe { EnableWindow(state.btn_change_pwd, 1); }
+        unsafe {
+            EnableWindow(state.txt_curr_pwd, 1);
+            EnableWindow(state.txt_new_pwd, 1);
+            EnableWindow(state.txt_conf_pwd, 1);
+            EnableWindow(state.txt_new_hint, 1);
+            EnableWindow(state.btn_change_pwd, 1);
+        }
 
         if dev.is_unlocked {
             let sec_d = dev
@@ -2659,10 +3529,9 @@ fn update_selected_device_ui(state: &mut AppUiState) {
                 .map(|s| format!(" [{}]", s))
                 .unwrap_or_default();
             state.sec_state_str = format!(
-                "{}{}{}",
-                tr("보안 상태: 잠금 해제됨 — 보안 드라이브", "Status: Unlocked — Security Drive", "状態: ロック解除済 — ドライブ"),
-                sec_d,
-                tr(" 접근 가능", " Accessible", " 使用可能")
+                "{}{}",
+                tr("보안 상태: 잠금 해제됨 (Unlocked)", "Status: Unlocked", "状態: ロック解除済 (Unlocked)"),
+                sec_d
             );
             unsafe {
                 EnableWindow(state.txt_pwd, 0);
@@ -2672,9 +3541,9 @@ fn update_selected_device_ui(state: &mut AppUiState) {
             }
         } else {
             state.sec_state_str = tr(
-                "보안 상태: 잠김 — 비밀번호를 입력해 잠금을 해제하세요",
-                "Status: Locked — Enter password to unlock security drive",
-                "状態: ロック中 — パスワードを入力して解除してください",
+                "보안 상태: 잠김 (Locked)",
+                "Status: Locked",
+                "状態: ロック中 (Locked)",
             )
             .to_string();
             unsafe {
@@ -2682,7 +3551,9 @@ fn update_selected_device_ui(state: &mut AppUiState) {
                 EnableWindow(state.btn_unlock, 1);
                 EnableWindow(state.btn_lock, 0);
                 EnableWindow(state.btn_shred, 0);
-                SetFocus(state.txt_pwd);
+                if state.active_tab == 0 {
+                    SetFocus(state.txt_pwd);
+                }
             }
         }
     }
@@ -2700,394 +3571,1125 @@ fn update_selected_device_ui(state: &mut AppUiState) {
     }
 }
 
-// ============================================================================
-// Password Change Modal Dialog
-// ============================================================================
-struct PwdDlgData {
-    done: bool,
-    confirmed: bool,
-    txt_curr: HWND,
-    txt_new: HWND,
-    txt_conf: HWND,
-    txt_hint: HWND,
-    curr_val: String,
-    new_val: String,
-    hint_val: String,
+unsafe fn get_ctrl_client_rect(hwnd_main: HWND, ctrl: HWND) -> Option<RECT> {
+    if ctrl.is_null() || IsWindowEnabled(ctrl) == 0 || IsWindowVisible(ctrl) == 0 {
+        return None;
+    }
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    if GetWindowRect(ctrl, &mut rc) == 0 {
+        return None;
+    }
+    if rc.right <= rc.left || rc.bottom <= rc.top {
+        return None;
+    }
+    let mut pt_tl = POINT { x: rc.left, y: rc.top };
+    let mut pt_br = POINT { x: rc.right, y: rc.bottom };
+    ScreenToClient(hwnd_main, &mut pt_tl);
+    ScreenToClient(hwnd_main, &mut pt_br);
+    Some(RECT {
+        left: pt_tl.x,
+        top: pt_tl.y,
+        right: pt_br.x,
+        bottom: pt_br.y,
+    })
 }
 
-static mut PWD_DLG_STATE: Option<PwdDlgData> = None;
-
-unsafe extern "system" fn pwd_dlg_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    match msg {
-        WM_CTLCOLORSTATIC => {
-            let hdc = w_param as HDC;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, rgb(30, 41, 59));
-            GetStockObject(0) as LRESULT
-        }
-        WM_COMMAND => {
-            let id = w_param & 0xFFFF;
-            if id == ID_DLG_OK {
-                let ptr = &raw mut PWD_DLG_STATE;
-                if let Some(ref mut st) = *ptr {
-                    let c = get_ctrl_text(st.txt_curr);
-                    let n = get_ctrl_text(st.txt_new);
-                    let cf = get_ctrl_text(st.txt_conf);
-                    let h = get_ctrl_text(st.txt_hint);
-
-                    if c.is_empty() {
-                        let m = to_wide(tr("현재 비밀번호를 입력해 주세요.", "Please enter current password.", "現在のパスワードを入力してください。"));
-                        let t = to_wide(tr("알림", "Notice", "確認"));
-                        MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
-                        return 0;
-                    }
-                    if n.len() < 4 || n.len() > 15 {
-                        let m = to_wide(tr("새 비밀번호는 4~15자로 입력해 주세요.", "New password must be 4-15 characters.", "新しいパスワードは4〜15文字で入力してください。"));
-                        let t = to_wide(tr("알림", "Notice", "確認"));
-                        MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
-                        return 0;
-                    }
-                    if n != cf {
-                        let m = to_wide(tr("새 비밀번호와 확인란이 일치하지 않습니다.", "Passwords do not match.", "新しいパスワードと確認欄が一致しません。"));
-                        let t = to_wide(tr("알림", "Notice", "確認"));
-                        MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
-                        return 0;
-                    }
-                    st.curr_val = c;
-                    st.new_val = n;
-                    st.hint_val = h;
-                    st.confirmed = true;
-                    st.done = true;
-                    DestroyWindow(hwnd);
-                }
-                0
-            } else if id == ID_DLG_CANCEL {
-                let ptr = &raw mut PWD_DLG_STATE;
-                if let Some(ref mut st) = *ptr {
-                    st.done = true;
-                }
-                DestroyWindow(hwnd);
-                0
-            } else {
-                DefWindowProcW(hwnd, msg, w_param, l_param)
-            }
-        }
-        WM_CLOSE => {
-            let ptr = &raw mut PWD_DLG_STATE;
-            if let Some(ref mut st) = *ptr {
-                st.done = true;
-            }
-            DestroyWindow(hwnd);
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, w_param, l_param),
+fn fluent_draw_elevated_glass_card(
+    buf: &mut [u32],
+    bw: i32,
+    bh: i32,
+    rc: &RECT,
+    s: f32,
+    dark: bool,
+    accent_glow: COLORREF,
+    glow_int: f32,
+    mx: f32,
+    my: f32,
+) {
+    let rad = sc(8, s) as f32;
+    if dark {
+        // Official WinUI 3 CardBackgroundFillColorDefault (#0DFFFFFF over LayerFillColorDefault)
+        // + CardStrokeColorDefault (top specular highlight #16FFFFFF, side/bottom #0F000000)
+        fluent_draw_glass_box(
+            buf,
+            bw,
+            bh,
+            rc,
+            rad,
+            rgb(56, 56, 56),
+            rgb(45, 45, 45),
+            0.74,
+            rgb(115, 115, 115),
+            rgb(62, 62, 62),
+            0.52,
+            accent_glow,
+            sc(14, s) as f32,
+            glow_int * 0.45,
+            0.36,
+        );
+        fluent_apply_acrylic_noise(buf, bw, bh, rc, rad, 1.8);
+        fluent_apply_reveal_highlight(
+            buf,
+            bw,
+            bh,
+            rc,
+            rad,
+            mx,
+            my,
+            sc(175, s) as f32,
+            rgb(96, 205, 255),
+            0.035,
+            0.32,
+        );
+    } else {
+        fluent_draw_glass_box(
+            buf,
+            bw,
+            bh,
+            rc,
+            rad,
+            rgb(255, 255, 255),
+            rgb(251, 251, 251),
+            0.84,
+            rgb(255, 255, 255),
+            rgb(218, 218, 218),
+            0.85,
+            accent_glow,
+            sc(12, s) as f32,
+            glow_int * 0.25,
+            0.10,
+        );
+        fluent_apply_reveal_highlight(
+            buf,
+            bw,
+            bh,
+            rc,
+            rad,
+            mx,
+            my,
+            sc(175, s) as f32,
+            rgb(0, 120, 212),
+            0.025,
+            0.22,
+        );
     }
 }
 
-fn show_change_password_dialog(
-    parent: HWND,
-    h_inst: HINSTANCE,
-    scale: f32,
-    font_reg: HFONT,
-    font_bold: HFONT,
-    h_icon: HICON,
-    current_hint: &str,
-) -> Option<(String, String, String)> {
-    unsafe {
-        let cls_name = to_wide("SecureUSBPwdDlgClassV3");
-        let wc = WNDCLASSEXW {
-            cb_size: std::mem::size_of::<WNDCLASSEXW>() as UINT,
-            style: 0,
-            lpfn_wnd_proc: pwd_dlg_proc,
-            cb_cls_extra: 0,
-            cb_wnd_extra: 0,
-            h_instance: h_inst,
-            h_icon,
-            h_cursor: LoadCursorW(null_mut(), 32512 as *const u16),
-            hbr_background: GetStockObject(0) as HBRUSH,
-            lpsz_menu_name: null(),
-            lpsz_class_name: cls_name.as_ptr(),
-            h_icon_sm: h_icon,
-        };
-        RegisterClassExW(&wc);
-
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
-        let mut rc = RECT { left: 0, top: 0, right: sc(470, scale), bottom: sc(250, scale) };
-        AdjustWindowRectEx(&mut rc, style, 0, 0);
-        let w = rc.right - rc.left;
-        let h = rc.bottom - rc.top;
-
-        let scr_w = GetSystemMetrics(0);
-        let scr_h = GetSystemMetrics(1);
-        let title = to_wide(tr("비밀번호 및 힌트 변경", "Change Password & Hint", "パスワードとヒントの変更"));
-
-        let hwnd_dlg = CreateWindowExW(
-            0,
-            cls_name.as_ptr(),
-            title.as_ptr(),
-            style,
-            (scr_w - w) / 2,
-            (scr_h - h) / 2,
-            w,
-            h,
-            parent,
-            null_mut(),
-            h_inst,
-            null_mut(),
+fn fluent_draw_recessed_glass_tile(
+    buf: &mut [u32],
+    bw: i32,
+    bh: i32,
+    rc: &RECT,
+    rad: f32,
+    dark: bool,
+) {
+    if dark {
+        // Official WinUI 3 CardBackgroundFillColorSecondary (#08FFFFFF / #232323 recessed Expander row)
+        fluent_draw_glass_box(
+            buf,
+            bw,
+            bh,
+            rc,
+            rad,
+            rgb(35, 35, 35),
+            rgb(31, 31, 31),
+            0.78,
+            rgb(76, 76, 76),
+            rgb(48, 48, 48),
+            0.46,
+            rgb(96, 205, 255),
+            0.0,
+            0.0,
+            0.0,
         );
-
-        let c_static = to_wide("STATIC");
-        let c_edit = to_wide("EDIT");
-        let c_btn = to_wide("BUTTON");
-
-        let mk_lbl = |txt: &str, y: i32| {
-            let t = to_wide(txt);
-            let hw = CreateWindowExW(
-                0,
-                c_static.as_ptr(),
-                t.as_ptr(),
-                WS_CHILD | WS_VISIBLE,
-                sc(22, scale),
-                sc(y, scale),
-                sc(165, scale),
-                sc(24, scale),
-                hwnd_dlg,
-                null_mut(),
-                h_inst,
-                null_mut(),
-            );
-            SendMessageW(hw, WM_SETFONT, font_reg as WPARAM, 1);
-        };
-        let mk_edit = |id: usize, y: i32, is_pwd: bool, init: &str| -> HWND {
-            let t = to_wide(init);
-            let mut st = WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL;
-            if is_pwd {
-                st |= ES_PASSWORD;
-            }
-            let hw = CreateWindowExW(
-                0,
-                c_edit.as_ptr(),
-                t.as_ptr(),
-                st,
-                sc(195, scale),
-                sc(y - 3, scale),
-                sc(250, scale),
-                sc(28, scale),
-                hwnd_dlg,
-                id as HMENU,
-                h_inst,
-                null_mut(),
-            );
-            SendMessageW(hw, WM_SETFONT, font_reg as WPARAM, 1);
-            SendMessageW(hw, EM_SETMARGINS, 3, (((sc(6, scale) as isize) << 16) | (sc(6, scale) as isize)) as LPARAM);
-            hw
-        };
-
-        mk_lbl(tr("현재 비밀번호:", "Current Password:", "現在のパスワード:"), 26);
-        let txt_curr = mk_edit(ID_DLG_CURR_PWD, 26, true, "");
-
-        mk_lbl(tr("새 비밀번호 (4~15자):", "New Password (4-15):", "新しいパスワード (4~15):"), 64);
-        let txt_new = mk_edit(ID_DLG_NEW_PWD, 64, true, "");
-
-        mk_lbl(tr("새 비밀번호 확인:", "Confirm Password:", "新しいパスワード(確認):"), 102);
-        let txt_conf = mk_edit(ID_DLG_CONF_PWD, 102, true, "");
-
-        mk_lbl(tr("새 비밀번호 힌트:", "Password Hint:", "パスワードのヒント:"), 140);
-        let txt_hint = mk_edit(ID_DLG_HINT, 140, false, current_hint);
-
-        let ok_txt = to_wide(tr("변경 저장", "Save Changes", "変更を保存"));
-        let btn_ok = CreateWindowExW(
-            0,
-            c_btn.as_ptr(),
-            ok_txt.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            sc(195, scale),
-            sc(188, scale),
-            sc(130, scale),
-            sc(38, scale),
-            hwnd_dlg,
-            ID_DLG_OK as HMENU,
-            h_inst,
-            null_mut(),
+    } else {
+        fluent_draw_glass_box(
+            buf,
+            bw,
+            bh,
+            rc,
+            rad,
+            rgb(246, 246, 246),
+            rgb(242, 242, 242),
+            0.85,
+            rgb(229, 229, 229),
+            rgb(216, 216, 216),
+            0.78,
+            rgb(0, 120, 212),
+            0.0,
+            0.0,
+            0.0,
         );
-        SendMessageW(btn_ok, WM_SETFONT, font_bold as WPARAM, 1);
-
-        let can_txt = to_wide(tr("취소", "Cancel", "キャンセル"));
-        let btn_can = CreateWindowExW(
-            0,
-            c_btn.as_ptr(),
-            can_txt.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            sc(335, scale),
-            sc(188, scale),
-            sc(110, scale),
-            sc(38, scale),
-            hwnd_dlg,
-            ID_DLG_CANCEL as HMENU,
-            h_inst,
-            null_mut(),
-        );
-        SendMessageW(btn_can, WM_SETFONT, font_reg as WPARAM, 1);
-
-        let ptr = &raw mut PWD_DLG_STATE;
-        *ptr = Some(PwdDlgData {
-            done: false,
-            confirmed: false,
-            txt_curr,
-            txt_new,
-            txt_conf,
-            txt_hint,
-            curr_val: String::new(),
-            new_val: String::new(),
-            hint_val: String::new(),
-        });
-
-        EnableWindow(parent, 0);
-        SetFocus(txt_curr);
-
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            if IsDialogMessageW(hwnd_dlg, &mut msg) == 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-            if let Some(ref st) = *ptr {
-                if st.done {
-                    break;
-                }
-            }
-        }
-
-        EnableWindow(parent, 1);
-        SetFocus(parent);
-
-        if let Some(st) = (*ptr).take() {
-            if st.confirmed {
-                return Some((st.curr_val, st.new_val, st.hint_val));
-            }
-        }
-        None
     }
 }
 
 // ============================================================================
-// Main Window Paint & Event Handling (Double-Buffered Canvas)
+// Main Window Paint & Event Handling (Microsoft Fluent 2 / WinUI 3 Design)
 // ============================================================================
-unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
+unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) {
     let s = state.dpi_scale;
-    let cw = sc(700, s);
+    let cw = sc(860, s);
+    let ch = sc(540, s);
+    let sb_w = sc(200, s);
     let dark = state.dark_mode;
+    let mx = state.cursor_client.x as f32;
+    let my = state.cursor_client.y as f32;
 
-    let bg_main = if dark { rgb(11, 17, 32) } else { rgb(241, 245, 249) };
-    let bg_card = if dark { rgb(23, 33, 51) } else { rgb(255, 255, 255) };
-    let border_card = if dark { rgb(51, 65, 85) } else { rgb(203, 213, 225) };
-    let col_hdr = if dark { rgb(248, 250, 252) } else { rgb(15, 23, 42) };
-    let col_label = if dark { rgb(226, 232, 240) } else { rgb(30, 41, 59) };
-    let col_sub = if dark { rgb(148, 163, 184) } else { rgb(71, 85, 105) };
-
-    // 0. Overall Slate Background
-    fill_solid_rect(hdc, rc_client, bg_main);
-
-    // 1. Top Dark Navy Hero Banner (Smooth Multi-Band Vertical Gradient)
-    let banner_r = rc_client.right.max(cw);
-    let banner_h = sc(74, s);
-    let steps = 12;
-    for i in 0..steps {
-        let y0 = (i * banner_h) / steps;
-        let y1 = ((i + 1) * banner_h) / steps;
-        let r = (2 + (i * 11) / steps) as u8;
-        let g = (6 + (i * 15) / steps) as u8;
-        let b = (23 + (i * 22) / steps) as u8;
-        let rc_band = RECT { left: 0, top: y0, right: banner_r, bottom: y1 };
-        fill_solid_rect(hdc, &rc_band, rgb(r, g, b));
+    let bw = (rc_client.right - rc_client.left).max(cw);
+    let bh = (rc_client.bottom - rc_client.top).max(ch);
+    let total_px = (bw * bh) as usize;
+    if state.bg_pixels.len() != total_px {
+        state.bg_pixels.resize(total_px, 0);
     }
-    // Dual-tone glowing bottom accent bar
-    let rc_accent1 = RECT { left: 0, top: sc(74, s), right: banner_r, bottom: sc(76, s) };
-    fill_solid_rect(hdc, &rc_accent1, rgb(56, 189, 248));
-    let rc_accent2 = RECT { left: 0, top: sc(76, s), right: banner_r, bottom: sc(77, s) };
-    fill_solid_rect(hdc, &rc_accent2, rgb(37, 99, 235));
+    state.bg_w = bw;
+    state.bg_h = bh;
 
-    // Rounded Glass Tile Frame behind App Shield Icon
-    let rc_ico_tile = RECT {
-        left: sc(18, s),
-        top: sc(12, s),
-        right: sc(68, s),
-        bottom: sc(62, s),
+    // Official WinUI 3 TextFillColorPrimary / Secondary / Tertiary
+    let col_hdr = if dark { rgb(255, 255, 255) } else { rgb(26, 26, 26) };
+    let col_label = if dark { rgb(232, 232, 232) } else { rgb(36, 36, 36) };
+    let col_sub = if dark { rgb(166, 166, 166) } else { rgb(96, 96, 96) };
+
+    // Determine Status Badge & Dynamic Ambient Glow Color
+    let (badge_txt, badge_top, badge_bot, badge_rim, badge_glow, dot_col) = if state.devices.is_empty() {
+        (
+            "NO DEVICE",
+            rgb(56, 56, 56),
+            rgb(42, 42, 42),
+            rgb(140, 140, 140),
+            rgb(96, 205, 255),
+            rgb(166, 166, 166),
+        )
+    } else {
+        let d = &state.devices[state.selected_idx];
+        if !d.has_security_lun {
+            (
+                "PUBLIC MODE",
+                rgb(0, 120, 212),
+                rgb(0, 95, 184),
+                rgb(96, 205, 255),
+                rgb(96, 205, 255),
+                rgb(152, 224, 255),
+            )
+        } else if d.is_unlocked {
+            (
+                "UNLOCKED",
+                rgb(16, 137, 62),
+                rgb(12, 108, 48),
+                rgb(108, 203, 95),
+                rgb(108, 203, 95),
+                rgb(158, 235, 148),
+            )
+        } else {
+            (
+                "LOCKED",
+                rgb(196, 43, 28),
+                rgb(158, 32, 20),
+                rgb(255, 153, 164),
+                rgb(255, 153, 164),
+                rgb(255, 198, 204),
+            )
+        }
     };
-    draw_rounded_box(hdc, &rc_ico_tile, rgb(15, 23, 42), rgb(56, 189, 248), sc(12, s));
-    if !state.h_icon.is_null() {
-        DrawIconEx(hdc, sc(22, s), sc(16, s), state.h_icon, sc(42, s), sc(42, s), 0, null_mut(), 3);
+
+    // ========================================================================
+    // STAGE 1: 32-BIT BGRA FLUENT 2 PIXEL SHADER PASS (Mica, LayerPane, Acrylic, Reveal)
+    // ========================================================================
+    fill_fluent_ambient_backdrop(&mut state.bg_pixels, bw, bh, sb_w, s, dark, badge_glow);
+
+    // Sidebar Top Brand Emblem Tile
+    let rc_ico_tile = RECT {
+        left: sc(14, s),
+        top: sc(16, s),
+        right: sc(54, s),
+        bottom: sc(56, s),
+    };
+    fluent_draw_glass_box(
+        &mut state.bg_pixels,
+        bw,
+        bh,
+        &rc_ico_tile,
+        sc(8, s) as f32,
+        if dark { rgb(46, 46, 46) } else { rgb(255, 255, 255) },
+        if dark { rgb(34, 34, 34) } else { rgb(244, 244, 244) },
+        0.92,
+        rgb(96, 205, 255),
+        rgb(72, 72, 72),
+        0.65,
+        rgb(96, 205, 255),
+        sc(10, s) as f32,
+        if dark { 0.25 } else { 0.10 },
+        0.25,
+    );
+
+    // Sidebar Version Badge Pill
+    let rc_ver = RECT {
+        left: sc(62, s),
+        top: sc(39, s),
+        right: sc(118, s),
+        bottom: sc(56, s),
+    };
+    fluent_draw_glass_box(
+        &mut state.bg_pixels,
+        bw,
+        bh,
+        &rc_ver,
+        sc(4, s) as f32,
+        if dark { rgb(45, 45, 45) } else { rgb(228, 240, 252) },
+        if dark { rgb(36, 36, 36) } else { rgb(214, 232, 250) },
+        0.90,
+        rgb(96, 205, 255),
+        if dark { rgb(64, 64, 64) } else { rgb(0, 120, 212) },
+        0.55,
+        rgb(96, 205, 255),
+        0.0,
+        0.0,
+        0.0,
+    );
+
+    // Sidebar Horizontal Divider Lines (WinUI 3 DividerStrokeColorDefaultBrush #14FFFFFF)
+    for &dy in &[sc(70, s), sc(424, s)] {
+        if dy >= 0 && dy < bh {
+            let row = (dy * bw) as usize;
+            for x in sc(14, s)..sc(186, s).min(bw) {
+                let idx = row + x as usize;
+                state.bg_pixels[idx] = if dark {
+                    blend_pixel(state.bg_pixels[idx], 255.0, 255.0, 255.0, 0.08)
+                } else {
+                    blend_pixel(state.bg_pixels[idx], 0.0, 0.0, 0.0, 0.08)
+                };
+            }
+        }
     }
+
+    // Active Sidebar Navigation Item subtle ambient glow
+    let active_nav_hwnd = match state.active_tab {
+        0 => state.nav_home,
+        1 => state.nav_pwd,
+        2 => state.nav_shred,
+        3 => state.nav_settings,
+        _ => state.nav_about,
+    };
+    if let Some(rc_nav) = get_ctrl_client_rect(state.hwnd_main, active_nav_hwnd) {
+        fluent_add_rect_glow(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_nav,
+            sc(6, s) as f32,
+            rgb(96, 205, 255),
+            sc(10, s) as f32,
+            if dark { 0.16 } else { 0.08 },
+        );
+    }
+
+    // Right Pane Persistent Hero Header Banner Card with 3D Flowing Violet/Cyan Wave
+    let rc_hero = RECT {
+        left: sc(220, s),
+        top: sc(14, s),
+        right: cw - sc(20, s),
+        bottom: sc(84, s),
+    };
+    fluent_draw_hero_wave_card(&mut state.bg_pixels, bw, bh, &rc_hero, sc(8, s) as f32, s);
+    fluent_apply_acrylic_noise(&mut state.bg_pixels, bw, bh, &rc_hero, sc(8, s) as f32, 1.6);
+
+    // Status Badge Pill inside Hero Card
+    let rc_badge = RECT {
+        left: cw - sc(158, s),
+        top: sc(35, s),
+        right: cw - sc(36, s),
+        bottom: sc(63, s),
+    };
+    fluent_draw_glass_box(
+        &mut state.bg_pixels,
+        bw,
+        bh,
+        &rc_badge,
+        sc(14, s) as f32,
+        badge_top,
+        badge_bot,
+        0.92,
+        badge_rim,
+        badge_top,
+        0.85,
+        badge_glow,
+        sc(12, s) as f32,
+        0.45,
+        0.30,
+    );
+
+    if state.active_tab == 0 {
+        let rc_card1 = RECT {
+            left: sc(220, s),
+            top: sc(138, s),
+            right: cw - sc(20, s),
+            bottom: sc(318, s),
+        };
+        fluent_draw_elevated_glass_card(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_card1,
+            s,
+            dark,
+            rgb(96, 205, 255),
+            0.14,
+            mx,
+            my,
+        );
+
+        let rc_acc1 = RECT {
+            left: sc(236, s),
+            top: sc(151, s),
+            right: sc(240, s),
+            bottom: sc(168, s),
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_acc1,
+            sc(2, s) as f32,
+            rgb(96, 205, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(152, 224, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(96, 205, 255),
+            sc(6, s) as f32,
+            0.40,
+            0.0,
+        );
+
+        // Partition Capacity Gauge Bar
+        let rc_bar = RECT {
+            left: sc(236, s),
+            top: sc(177, s),
+            right: rc_card1.right - sc(16, s),
+            bottom: sc(211, s),
+        };
+        if state.devices.is_empty() {
+            fluent_draw_recessed_glass_tile(&mut state.bg_pixels, bw, bh, &rc_bar, sc(6, s) as f32, dark);
+        } else {
+            let d = &state.devices[state.selected_idx];
+            let l0 = d.lun_gb(0);
+            let l1 = d.lun_gb(1);
+            let tot = (l0 + l1).max(0.001);
+            if !d.has_security_lun || l1 <= 0.001 {
+                fluent_draw_glass_box(
+                    &mut state.bg_pixels,
+                    bw,
+                    bh,
+                    &rc_bar,
+                    sc(6, s) as f32,
+                    rgb(0, 120, 212),
+                    rgb(0, 95, 184),
+                    0.92,
+                    rgb(96, 205, 255),
+                    rgb(0, 120, 212),
+                    0.85,
+                    rgb(96, 205, 255),
+                    sc(10, s) as f32,
+                    0.28,
+                    0.18,
+                );
+            } else {
+                let total_w = rc_bar.right - rc_bar.left;
+                let w0 = ((total_w as f64 * (l0 / tot)) as i32).max(sc(144, s));
+                let (sec_top, sec_bot, sec_rim, sec_glow) = if d.is_unlocked {
+                    (rgb(16, 137, 62), rgb(12, 108, 48), rgb(108, 203, 95), rgb(108, 203, 95))
+                } else {
+                    (rgb(196, 43, 28), rgb(158, 32, 20), rgb(255, 153, 164), rgb(255, 153, 164))
+                };
+
+                fluent_draw_glass_box(
+                    &mut state.bg_pixels,
+                    bw,
+                    bh,
+                    &rc_bar,
+                    sc(6, s) as f32,
+                    sec_top,
+                    sec_bot,
+                    0.90,
+                    sec_rim,
+                    sec_top,
+                    0.80,
+                    sec_glow,
+                    sc(10, s) as f32,
+                    0.28,
+                    0.18,
+                );
+
+                if d.is_unlocked && d.sec_total_bytes > 0 {
+                    let sec_w = rc_bar.right - (rc_bar.left + w0);
+                    let used_w = ((sec_w as f64) * (d.sec_used_bytes as f64 / d.sec_total_bytes as f64)) as i32;
+                    if used_w > 2 {
+                        let rc_used = RECT {
+                            left: rc_bar.left + w0,
+                            top: rc_bar.top + 1,
+                            right: (rc_bar.left + w0 + used_w).min(rc_bar.right - sc(4, s)),
+                            bottom: rc_bar.bottom - 1,
+                        };
+                        fluent_draw_glass_box(
+                            &mut state.bg_pixels,
+                            bw,
+                            bh,
+                            &rc_used,
+                            sc(5, s) as f32,
+                            rgb(10, 92, 42),
+                            rgb(8, 72, 32),
+                            0.90,
+                            rgb(108, 203, 95),
+                            rgb(16, 137, 62),
+                            0.50,
+                            rgb(108, 203, 95),
+                            0.0,
+                            0.0,
+                            0.0,
+                        );
+                    }
+                }
+
+                // Launcher Left Segment Pill
+                let rc0_round = RECT {
+                    left: rc_bar.left,
+                    top: rc_bar.top,
+                    right: rc_bar.left + w0,
+                    bottom: rc_bar.bottom,
+                };
+                fluent_draw_glass_box(
+                    &mut state.bg_pixels,
+                    bw,
+                    bh,
+                    &rc0_round,
+                    sc(6, s) as f32,
+                    rgb(0, 120, 212),
+                    rgb(0, 95, 184),
+                    0.96,
+                    rgb(96, 205, 255),
+                    rgb(0, 120, 212),
+                    0.88,
+                    rgb(96, 205, 255),
+                    sc(8, s) as f32,
+                    0.25,
+                    0.0,
+                );
+            }
+        }
+
+        // Tile 2: WinUI 3 InfoBar Semantic Status Banner Row
+        let rc_tile2 = RECT {
+            left: sc(236, s),
+            top: sc(222, s),
+            right: rc_card1.right - sc(16, s),
+            bottom: sc(256, s),
+        };
+        if state.devices.is_empty() {
+            fluent_draw_recessed_glass_tile(&mut state.bg_pixels, bw, bh, &rc_tile2, sc(4, s) as f32, dark);
+        } else {
+            let d = &state.devices[state.selected_idx];
+            let (t_top, t_bot, t_rim, t_glow) = if !d.has_security_lun {
+                if dark {
+                    (rgb(28, 44, 62), rgb(24, 38, 54), rgb(96, 205, 255), rgb(96, 205, 255))
+                } else {
+                    (rgb(240, 246, 255), rgb(228, 240, 252), rgb(0, 120, 212), rgb(0, 120, 212))
+                }
+            } else if d.is_unlocked {
+                if dark {
+                    (rgb(28, 52, 36), rgb(24, 44, 30), rgb(108, 203, 95), rgb(108, 203, 95))
+                } else {
+                    (rgb(223, 246, 221), rgb(208, 238, 205), rgb(16, 137, 62), rgb(16, 137, 62))
+                }
+            } else if dark {
+                // Official WinUI 3 SystemFillColorCriticalBackground (#442726)
+                (rgb(68, 39, 38), rgb(56, 32, 31), rgb(255, 153, 164), rgb(255, 153, 164))
+            } else {
+                (rgb(253, 231, 233), rgb(250, 216, 219), rgb(196, 43, 28), rgb(196, 43, 28))
+            };
+            fluent_draw_glass_box(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_tile2,
+                sc(4, s) as f32,
+                t_top,
+                t_bot,
+                0.88,
+                t_rim,
+                t_top,
+                0.65,
+                t_glow,
+                sc(8, s) as f32,
+                if dark { 0.18 } else { 0.08 },
+                0.0,
+            );
+        }
+
+        // Tile 3A & 3B (Hint & Remaining Retries)
+        let rc_tile3a = RECT {
+            left: sc(236, s),
+            top: sc(266, s),
+            right: sc(524, s),
+            bottom: sc(300, s),
+        };
+        fluent_draw_recessed_glass_tile(&mut state.bg_pixels, bw, bh, &rc_tile3a, sc(4, s) as f32, dark);
+
+        let rc_tile3b = RECT {
+            left: sc(532, s),
+            top: sc(266, s),
+            right: rc_card1.right - sc(16, s),
+            bottom: sc(300, s),
+        };
+        fluent_draw_recessed_glass_tile(&mut state.bg_pixels, bw, bh, &rc_tile3b, sc(4, s) as f32, dark);
+
+        // Card 2: Security Authentication & Quick Drive Controls
+        let rc_card2 = RECT {
+            left: sc(220, s),
+            top: sc(328, s),
+            right: cw - sc(20, s),
+            bottom: sc(524, s),
+        };
+        fluent_draw_elevated_glass_card(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_card2,
+            s,
+            dark,
+            rgb(96, 205, 255),
+            0.16,
+            mx,
+            my,
+        );
+
+        let rc_acc2 = RECT {
+            left: sc(236, s),
+            top: sc(341, s),
+            right: sc(240, s),
+            bottom: sc(358, s),
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_acc2,
+            sc(2, s) as f32,
+            rgb(96, 205, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(152, 224, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(96, 205, 255),
+            sc(6, s) as f32,
+            0.40,
+            0.0,
+        );
+
+        // Official WinUI 3 PasswordBox with Bottom Accent Focus Pill (`TextControlElevationBorderFocusedBrush`)
+        let pwd_enabled = !state.devices.is_empty()
+            && state.devices[state.selected_idx].has_security_lun
+            && !state.devices[state.selected_idx].is_unlocked;
+        let pwd_focused = pwd_enabled && (state.focused_ctrl == state.txt_pwd || state.focused_ctrl.is_null());
+        let rc_pwd_box = RECT {
+            left: sc(320, s),
+            top: sc(372, s),
+            right: sc(722, s),
+            bottom: sc(404, s),
+        };
+        let (p_bg, p_rim_t, p_rim_b, p_glow_int) = if dark {
+            if pwd_enabled {
+                (rgb(30, 30, 30), rgb(90, 90, 90), rgb(70, 70, 70), if pwd_focused { 0.25 } else { 0.10 })
+            } else {
+                (rgb(30, 30, 30), rgb(55, 55, 55), rgb(45, 45, 45), 0.0)
+            }
+        } else if pwd_enabled {
+            (rgb(255, 255, 255), rgb(200, 200, 200), rgb(170, 170, 170), if pwd_focused { 0.14 } else { 0.05 })
+        } else {
+            (rgb(243, 243, 243), rgb(218, 218, 218), rgb(200, 200, 200), 0.0)
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_pwd_box,
+            sc(4, s) as f32,
+            p_bg,
+            p_bg,
+            0.98,
+            p_rim_t,
+            p_rim_b,
+            0.85,
+            rgb(96, 205, 255),
+            sc(10, s) as f32,
+            p_glow_int,
+            0.0,
+        );
+        if pwd_enabled {
+            let pill_col = if pwd_focused {
+                if dark { rgb(96, 205, 255) } else { rgb(0, 120, 212) }
+            } else if dark {
+                rgb(154, 154, 154)
+            } else {
+                rgb(138, 138, 138)
+            };
+            fluent_draw_bottom_focus_pill(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_pwd_box,
+                sc(4, s) as f32,
+                s,
+                pill_col,
+                pwd_focused,
+            );
+        }
+
+        // Subtle Accent Glow behind Enabled Primary Action Buttons
+        if let Some(rc_u) = get_ctrl_client_rect(state.hwnd_main, state.btn_unlock) {
+            fluent_add_rect_glow(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_u,
+                sc(4, s) as f32,
+                rgb(96, 205, 255),
+                sc(12, s) as f32,
+                if dark { 0.26 } else { 0.14 },
+            );
+        }
+        if let Some(rc_l) = get_ctrl_client_rect(state.hwnd_main, state.btn_lock) {
+            fluent_add_rect_glow(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_l,
+                sc(4, s) as f32,
+                rgb(255, 153, 164),
+                sc(12, s) as f32,
+                if dark { 0.26 } else { 0.14 },
+            );
+        }
+    } else if state.active_tab == 1 {
+        let rc_card = RECT {
+            left: sc(220, s),
+            top: sc(138, s),
+            right: cw - sc(20, s),
+            bottom: sc(524, s),
+        };
+        fluent_draw_elevated_glass_card(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_card,
+            s,
+            dark,
+            rgb(96, 205, 255),
+            0.14,
+            mx,
+            my,
+        );
+
+        let rc_acc = RECT {
+            left: sc(236, s),
+            top: sc(151, s),
+            right: sc(240, s),
+            bottom: sc(168, s),
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_acc,
+            sc(2, s) as f32,
+            rgb(252, 225, 0),
+            rgb(217, 119, 6),
+            1.0,
+            rgb(254, 240, 138),
+            rgb(217, 119, 6),
+            1.0,
+            rgb(252, 225, 0),
+            sc(6, s) as f32,
+            0.40,
+            0.0,
+        );
+
+        // Compact 1-Line Hint & Retry Status Bar
+        let rc_pol = RECT {
+            left: sc(236, s),
+            top: sc(184, s),
+            right: rc_card.right - sc(16, s),
+            bottom: sc(222, s),
+        };
+        fluent_draw_recessed_glass_tile(&mut state.bg_pixels, bw, bh, &rc_pol, sc(6, s) as f32, dark);
+
+        let form_enabled = !state.devices.is_empty() && state.devices[state.selected_idx].has_security_lun;
+        let tab1_inputs = [
+            (250, state.txt_curr_pwd),
+            (296, state.txt_new_pwd),
+            (342, state.txt_conf_pwd),
+            (388, state.txt_new_hint),
+        ];
+
+        for &(y_top, ed_hwnd) in &tab1_inputs {
+            let is_foc = form_enabled && state.focused_ctrl == ed_hwnd;
+            let (inp_bg, inp_rim_t, inp_rim_b, inp_glow) = if dark {
+                if form_enabled {
+                    (rgb(30, 30, 30), rgb(90, 90, 90), rgb(70, 70, 70), if is_foc { 0.25 } else { 0.08 })
+                } else {
+                    (rgb(30, 30, 30), rgb(55, 55, 55), rgb(45, 45, 45), 0.0)
+                }
+            } else if form_enabled {
+                (rgb(255, 255, 255), rgb(200, 200, 200), rgb(170, 170, 170), if is_foc { 0.14 } else { 0.04 })
+            } else {
+                (rgb(243, 243, 243), rgb(218, 218, 218), rgb(200, 200, 200), 0.0)
+            };
+
+            let rc_inp = RECT {
+                left: sc(418, s),
+                top: sc(y_top, s),
+                right: sc(820, s),
+                bottom: sc(y_top + 34, s),
+            };
+            fluent_draw_glass_box(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_inp,
+                sc(4, s) as f32,
+                inp_bg,
+                inp_bg,
+                0.98,
+                inp_rim_t,
+                inp_rim_b,
+                0.85,
+                rgb(96, 205, 255),
+                sc(10, s) as f32,
+                inp_glow,
+                0.0,
+            );
+            if form_enabled {
+                let pill_col = if is_foc {
+                    if dark { rgb(96, 205, 255) } else { rgb(0, 120, 212) }
+                } else if dark {
+                    rgb(154, 154, 154)
+                } else {
+                    rgb(138, 138, 138)
+                };
+                fluent_draw_bottom_focus_pill(
+                    &mut state.bg_pixels,
+                    bw,
+                    bh,
+                    &rc_inp,
+                    sc(4, s) as f32,
+                    s,
+                    pill_col,
+                    is_foc,
+                );
+            }
+        }
+
+        if let Some(rc_chg) = get_ctrl_client_rect(state.hwnd_main, state.btn_change_pwd) {
+            fluent_add_rect_glow(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_chg,
+                sc(4, s) as f32,
+                rgb(96, 205, 255),
+                sc(12, s) as f32,
+                if dark { 0.25 } else { 0.14 },
+            );
+        }
+    } else if state.active_tab == 2 {
+        let rc_card = RECT {
+            left: sc(220, s),
+            top: sc(138, s),
+            right: cw - sc(20, s),
+            bottom: sc(524, s),
+        };
+        fluent_draw_elevated_glass_card(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_card,
+            s,
+            dark,
+            rgb(255, 153, 164),
+            0.14,
+            mx,
+            my,
+        );
+
+        let rc_acc = RECT {
+            left: sc(236, s),
+            top: sc(151, s),
+            right: sc(240, s),
+            bottom: sc(168, s),
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_acc,
+            sc(2, s) as f32,
+            rgb(255, 153, 164),
+            rgb(196, 43, 28),
+            1.0,
+            rgb(255, 198, 204),
+            rgb(196, 43, 28),
+            1.0,
+            rgb(255, 153, 164),
+            sc(6, s) as f32,
+            0.40,
+            0.0,
+        );
+
+        // Compact Status & Warning Banner without textbook fluff
+        let rc_warn = RECT {
+            left: sc(236, s),
+            top: sc(188, s),
+            right: rc_card.right - sc(16, s),
+            bottom: sc(264, s),
+        };
+        let (w_top, w_bot, w_rim) = if dark {
+            (rgb(68, 39, 38), rgb(56, 32, 31), rgb(255, 153, 164))
+        } else {
+            (rgb(253, 231, 233), rgb(250, 216, 219), rgb(196, 43, 28))
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_warn,
+            sc(6, s) as f32,
+            w_top,
+            w_bot,
+            0.88,
+            w_rim,
+            w_bot,
+            0.65,
+            rgb(255, 153, 164),
+            sc(10, s) as f32,
+            if dark { 0.18 } else { 0.08 },
+            0.0,
+        );
+
+        if let Some(rc_sh) = get_ctrl_client_rect(state.hwnd_main, state.btn_shred) {
+            fluent_add_rect_glow(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_sh,
+                sc(4, s) as f32,
+                rgb(255, 153, 164),
+                sc(14, s) as f32,
+                if dark { 0.30 } else { 0.16 },
+            );
+        }
+    } else if state.active_tab == 3 {
+        let rc_card = RECT {
+            left: sc(220, s),
+            top: sc(138, s),
+            right: cw - sc(20, s),
+            bottom: sc(524, s),
+        };
+        fluent_draw_elevated_glass_card(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_card,
+            s,
+            dark,
+            rgb(96, 205, 255),
+            0.14,
+            mx,
+            my,
+        );
+
+        let rc_acc = RECT {
+            left: sc(236, s),
+            top: sc(151, s),
+            right: sc(240, s),
+            bottom: sc(168, s),
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_acc,
+            sc(2, s) as f32,
+            rgb(96, 205, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(152, 224, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(96, 205, 255),
+            sc(6, s) as f32,
+            0.40,
+            0.0,
+        );
+
+        for &y0 in &[188, 254, 320, 386] {
+            let rc_r = RECT {
+                left: sc(236, s),
+                top: sc(y0, s),
+                right: rc_card.right - sc(16, s),
+                bottom: sc(y0 + 54, s),
+            };
+            fluent_draw_recessed_glass_tile(&mut state.bg_pixels, bw, bh, &rc_r, sc(6, s) as f32, dark);
+            fluent_apply_reveal_highlight(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_r,
+                sc(6, s) as f32,
+                mx,
+                my,
+                sc(140, s) as f32,
+                rgb(96, 205, 255),
+                0.03,
+                0.30,
+            );
+        }
+    } else {
+        // TAB 4: ABOUT / PROGRAM & HARDWARE SPECIFICATIONS
+        let rc_card = RECT {
+            left: sc(220, s),
+            top: sc(138, s),
+            right: cw - sc(20, s),
+            bottom: sc(524, s),
+        };
+        fluent_draw_elevated_glass_card(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_card,
+            s,
+            dark,
+            rgb(96, 205, 255),
+            0.14,
+            mx,
+            my,
+        );
+
+        let rc_acc = RECT {
+            left: sc(236, s),
+            top: sc(151, s),
+            right: sc(240, s),
+            bottom: sc(168, s),
+        };
+        fluent_draw_glass_box(
+            &mut state.bg_pixels,
+            bw,
+            bh,
+            &rc_acc,
+            sc(2, s) as f32,
+            rgb(96, 205, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(152, 224, 255),
+            rgb(0, 120, 212),
+            1.0,
+            rgb(96, 205, 255),
+            sc(6, s) as f32,
+            0.40,
+            0.0,
+        );
+
+        for i in 0..7 {
+            let y0 = 182 + (i * 47);
+            let rc_r = RECT {
+                left: sc(236, s),
+                top: sc(y0, s),
+                right: rc_card.right - sc(16, s),
+                bottom: sc(y0 + 41, s),
+            };
+            fluent_draw_recessed_glass_tile(&mut state.bg_pixels, bw, bh, &rc_r, sc(5, s) as f32, dark);
+            fluent_apply_reveal_highlight(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_r,
+                sc(5, s) as f32,
+                mx,
+                my,
+                sc(140, s) as f32,
+                rgb(96, 205, 255),
+                0.03,
+                0.28,
+            );
+        }
+    }
+
+    // Dynamic Hover Reveal Glow Halo around Currently Hovered Control
+    if !state.hovered_ctrl.is_null() {
+        if let Some(rc_hov) = get_ctrl_client_rect(state.hwnd_main, state.hovered_ctrl) {
+            let hov_col = if state.hovered_ctrl == state.btn_lock || state.hovered_ctrl == state.btn_shred {
+                rgb(255, 153, 164)
+            } else {
+                rgb(96, 205, 255)
+            };
+            fluent_add_rect_glow(
+                &mut state.bg_pixels,
+                bw,
+                bh,
+                &rc_hov,
+                sc(4, s) as f32,
+                hov_col,
+                sc(12, s) as f32,
+                if dark { 0.28 } else { 0.16 },
+            );
+        }
+    }
+
+    // Blit the 32-bit Fluent 2 / WinUI 3 Canvas to the Memory DC
+    blit_bgra_buffer(hdc, bw, bh, &state.bg_pixels);
+
+    // ========================================================================
+    // STAGE 2: CRISP GDI TYPOGRAPHY & VECTOR ICON OVERLAY PASS
+    // ========================================================================
+    if !state.h_icon.is_null() {
+        DrawIconEx(hdc, sc(18, s), sc(20, s), state.h_icon, sc(32, s), sc(32, s), 0, null_mut(), 3);
+    }
+    draw_text_rect(
+        hdc,
+        "SECURE VAULT",
+        RECT { left: sc(62, s), top: sc(15, s), right: sc(192, s), bottom: sc(37, s) },
+        state.font_card_hdr,
+        col_hdr,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    draw_text_rect(
+        hdc,
+        "v2.5.5",
+        rc_ver,
+        state.font_small_bold,
+        if dark { rgb(125, 211, 252) } else { rgb(29, 78, 216) },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    let page_title = match state.active_tab {
+        1 => tr("PASSWORD & SECURITY", "PASSWORD & SECURITY", "PASSWORD & SECURITY"),
+        2 => tr("DOD 3-PASS FILE SHREDDER", "DOD 3-PASS FILE SHREDDER", "DOD 3-PASS FILE SHREDDER"),
+        3 => tr("PREFERENCES", "PREFERENCES", "PREFERENCES"),
+        4 => tr("ABOUT & SPECIFICATIONS", "ABOUT & SPECIFICATIONS", "ABOUT & SPECIFICATIONS"),
+        _ => tr("SECURE USB VAULT", "SECURE USB VAULT", "SECURE USB VAULT"),
+    };
 
     draw_text_rect(
         hdc,
-        "SECURE USB VAULT",
-        RECT { left: sc(80, s), top: sc(12, s), right: sc(305, s), bottom: sc(40, s) },
+        page_title,
+        RECT { left: sc(238, s), top: sc(14, s), right: sc(685, s), bottom: sc(84, s) },
         state.font_title,
         rgb(255, 255, 255),
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
 
-    // Version Pill Tag next to Title
-    let rc_ver = RECT {
-        left: sc(306, s),
-        top: sc(17, s),
-        right: sc(362, s),
-        bottom: sc(36, s),
-    };
-    draw_rounded_box(hdc, &rc_ver, rgb(15, 35, 75), rgb(56, 189, 248), sc(9, s));
-    draw_text_rect(
-        hdc,
-        "v2.5.4",
-        rc_ver,
-        state.font_small_bold,
-        rgb(125, 211, 252),
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    draw_text_rect(
-        hdc,
-        tr(
-            "보안 파티션 잠금 해제 · 비밀번호 변경 · 파일 완전삭제",
-            "Security Partition Unlock · Password · File Shredder",
-            "セキュリティ領域解除 ・ パスワード管理 ・ ファイル完全削除",
-        ),
-        RECT { left: sc(80, s), top: sc(42, s), right: sc(540, s), bottom: sc(65, s) },
-        state.font_reg,
-        rgb(186, 230, 253),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    // Status Badge Pill with Outer Glow Ring & Live LED Dot
-    let (badge_txt, badge_col, badge_border, badge_glow, dot_col) = if state.devices.is_empty() {
-        ("NO DEVICE", rgb(51, 65, 85), rgb(148, 163, 184), rgb(30, 41, 59), rgb(148, 163, 184))
-    } else {
-        let d = &state.devices[state.selected_idx];
-        if !d.has_security_lun {
-            ("PUBLIC MODE", rgb(29, 78, 216), rgb(96, 165, 250), rgb(30, 58, 138), rgb(147, 197, 253))
-        } else if d.is_unlocked {
-            ("UNLOCKED", rgb(6, 95, 70), rgb(52, 211, 153), rgb(6, 78, 59), rgb(110, 231, 183))
-        } else {
-            ("LOCKED", rgb(159, 18, 57), rgb(251, 113, 133), rgb(136, 19, 55), rgb(253, 164, 175))
-        }
-    };
-    let rc_badge_glow = RECT {
-        left: cw - sc(146, s),
-        top: sc(21, s),
-        right: cw - sc(18, s),
-        bottom: sc(53, s),
-    };
-    draw_rounded_box(hdc, &rc_badge_glow, badge_glow, badge_glow, sc(16, s));
-    let rc_badge = RECT {
-        left: cw - sc(144, s),
-        top: sc(23, s),
-        right: cw - sc(20, s),
-        bottom: sc(51, s),
-    };
-    draw_rounded_box(hdc, &rc_badge, badge_col, badge_border, sc(14, s));
     draw_circle_dot(
         hdc,
-        rc_badge.left + sc(16, s),
+        rc_badge.left + sc(15, s),
         (rc_badge.top + rc_badge.bottom) / 2,
         sc(4, s),
         dot_col,
@@ -3096,7 +4698,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
         hdc,
         badge_txt,
         RECT {
-            left: rc_badge.left + sc(24, s),
+            left: rc_badge.left + sc(23, s),
             top: rc_badge.top,
             right: rc_badge.right - sc(6, s),
             bottom: rc_badge.bottom,
@@ -3106,394 +4708,497 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &AppUiState) {
         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
 
-    // 2. Device Selector Label with Accent Dot
-    draw_circle_dot(hdc, sc(27, s), sc(99, s), sc(4, s), rgb(56, 189, 248));
-    draw_text_rect(
-        hdc,
-        tr("연결된 보안 USB 장치 선택:", "Select Connected Secure USB:", "接続されているセキュリティUSB:"),
-        RECT { left: sc(37, s), top: sc(87, s), right: sc(430, s), bottom: sc(111, s) },
-        state.font_bold,
-        col_label,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    // 3. Card 1: Partition Capacity, Real Usage Gauge & Security Status
-    let rc_card1 = RECT {
-        left: sc(20, s),
-        top: sc(154, s),
-        right: cw - sc(20, s),
-        bottom: sc(326, s),
-    };
-    draw_elevated_card(hdc, &rc_card1, bg_card, border_card, s, dark);
-
-    // Card 1 Header Accent Pill
-    let rc_acc1 = RECT {
-        left: sc(36, s),
-        top: sc(167, s),
-        right: sc(40, s),
-        bottom: sc(184, s),
-    };
-    draw_rounded_box(hdc, &rc_acc1, rgb(56, 189, 248), rgb(56, 189, 248), sc(2, s));
-
-    draw_text_rect(
-        hdc,
-        tr(
-            "파티션 용량 및 실시간 보안 상태",
-            "Partition Capacity & Security Status",
-            "パーティション容量およびセキュリティ状態",
-        ),
-        RECT { left: sc(47, s), top: sc(163, s), right: rc_card1.right - sc(16, s), bottom: sc(187, s) },
-        state.font_card_hdr,
-        col_hdr,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    // Partition Visualizer Bar inside Card 1
-    let rc_bar = RECT {
-        left: sc(36, s),
-        top: sc(193, s),
-        right: rc_card1.right - sc(16, s),
-        bottom: sc(227, s),
-    };
-    if state.devices.is_empty() {
-        let empty_bg = if dark { rgb(15, 23, 42) } else { rgb(226, 232, 240) };
-        let empty_bd = if dark { rgb(51, 65, 85) } else { rgb(148, 163, 184) };
-        draw_rounded_box(hdc, &rc_bar, empty_bg, empty_bd, sc(8, s));
+    // ========================================================================
+    // TAB 0: HOME & LOCK CONTROL TEXT OVERLAY
+    // ========================================================================
+    if state.active_tab == 0 {
+        let rc_card1_right = cw - sc(20, s);
         draw_text_rect(
             hdc,
-            tr("장치가 감지되지 않았습니다.", "No device detected.", "デバイスが検出されていません。"),
-            RECT { left: rc_bar.left + sc(14, s), top: rc_bar.top, right: rc_bar.right, bottom: rc_bar.bottom },
-            state.font_reg,
-            col_sub,
+            tr(
+                "파티션 및 보안 상태",
+                "Partition & Security Status",
+                "パーティションおよびセキュリティ状態",
+            ),
+            RECT { left: sc(247, s), top: sc(147, s), right: rc_card1_right - sc(16, s), bottom: sc(171, s) },
+            state.font_card_hdr,
+            col_hdr,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
-    } else {
-        let d = &state.devices[state.selected_idx];
-        let l0 = d.lun_gb(0);
-        let l1 = d.lun_gb(1);
-        let tot = (l0 + l1).max(0.001);
-        if !d.has_security_lun || l1 <= 0.001 {
-            draw_rounded_box(hdc, &rc_bar, rgb(37, 99, 235), rgb(59, 130, 246), sc(8, s));
-            let txt = format!(
-                "{} ({:.2} GB — 100%)",
-                tr("단일 일반 파티션", "Single Public Partition", "単一通常パーティション"),
-                l0
-            );
+
+        let rc_bar = RECT {
+            left: sc(236, s),
+            top: sc(177, s),
+            right: rc_card1_right - sc(16, s),
+            bottom: sc(211, s),
+        };
+        if state.devices.is_empty() {
             draw_text_rect(
                 hdc,
-                &txt,
+                tr("장치가 감지되지 않았습니다.", "No device detected.", "デバイスが検出されていません。"),
                 RECT { left: rc_bar.left + sc(14, s), top: rc_bar.top, right: rc_bar.right, bottom: rc_bar.bottom },
-                state.font_small_bold,
-                rgb(255, 255, 255),
+                state.font_reg,
+                col_sub,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         } else {
-            let total_w = rc_bar.right - rc_bar.left;
-            let w0 = ((total_w as f64 * (l0 / tot)) as i32).max(sc(168, s));
-            let (sec_fill, sec_bd, sec_hi) = if d.is_unlocked {
-                (rgb(16, 185, 129), rgb(52, 211, 153), rgb(52, 211, 153))
+            let d = &state.devices[state.selected_idx];
+            let l0 = d.lun_gb(0);
+            let l1 = d.lun_gb(1);
+            let tot = (l0 + l1).max(0.001);
+            if !d.has_security_lun || l1 <= 0.001 {
+                let txt = format!(
+                    "{} ({:.2} GB — 100%)",
+                    tr("단일 일반 파티션", "Single Public Partition", "単一通常パーティション"),
+                    l0
+                );
+                draw_text_rect(
+                    hdc,
+                    &txt,
+                    RECT { left: rc_bar.left + sc(14, s), top: rc_bar.top, right: rc_bar.right, bottom: rc_bar.bottom },
+                    state.font_small_bold,
+                    rgb(255, 255, 255),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
             } else {
-                (rgb(225, 29, 72), rgb(251, 113, 133), rgb(244, 63, 94))
-            };
+                let total_w = rc_bar.right - rc_bar.left;
+                let w0 = ((total_w as f64 * (l0 / tot)) as i32).max(sc(144, s));
+                let rc0 = RECT { left: rc_bar.left, top: rc_bar.top, right: rc_bar.left + w0, bottom: rc_bar.bottom };
+                let rc1 = RECT { left: rc_bar.left + w0, top: rc_bar.top, right: rc_bar.right, bottom: rc_bar.bottom };
 
-            // Full rounded pill base (Security LUN color on right)
-            draw_rounded_box(hdc, &rc_bar, sec_fill, sec_bd, sc(8, s));
-
-            // Used capacity dark emerald fill inside unlocked security partition
-            if d.is_unlocked && d.sec_total_bytes > 0 {
-                let sec_w = rc_bar.right - (rc_bar.left + w0);
-                let used_w = ((sec_w as f64) * (d.sec_used_bytes as f64 / d.sec_total_bytes as f64)) as i32;
-                if used_w > 2 {
-                    let rc_used = RECT {
-                        left: rc_bar.left + w0,
-                        top: rc_bar.top + 1,
-                        right: (rc_bar.left + w0 + used_w).min(rc_bar.right - sc(4, s)),
-                        bottom: rc_bar.bottom - 1,
-                    };
-                    fill_solid_rect(hdc, &rc_used, rgb(4, 120, 87));
-                }
-            }
-
-            // Rounded left pill for Launcher LUN0 + square right seam at w0
-            let rc0_round = RECT {
-                left: rc_bar.left,
-                top: rc_bar.top,
-                right: rc_bar.left + w0,
-                bottom: rc_bar.bottom,
-            };
-            draw_rounded_box(hdc, &rc0_round, rgb(37, 99, 235), rgb(59, 130, 246), sc(8, s));
-            let rc0_seam = RECT {
-                left: rc_bar.left + w0 - sc(6, s),
-                top: rc_bar.top + 1,
-                right: rc_bar.left + w0,
-                bottom: rc_bar.bottom - 1,
-            };
-            fill_solid_rect(hdc, &rc0_seam, rgb(37, 99, 235));
-
-            // Subtle top specular highlight lines on both segments
-            let rc_hi0 = RECT {
-                left: rc_bar.left + sc(6, s),
-                top: rc_bar.top + 1,
-                right: rc_bar.left + w0 - 1,
-                bottom: rc_bar.top + 2,
-            };
-            fill_solid_rect(hdc, &rc_hi0, rgb(96, 165, 250));
-            let rc_hi1 = RECT {
-                left: rc_bar.left + w0 + 1,
-                top: rc_bar.top + 1,
-                right: rc_bar.right - sc(6, s),
-                bottom: rc_bar.top + 2,
-            };
-            fill_solid_rect(hdc, &rc_hi1, sec_hi);
-
-            let rc0 = RECT { left: rc_bar.left, top: rc_bar.top, right: rc_bar.left + w0, bottom: rc_bar.bottom };
-            let rc1 = RECT { left: rc_bar.left + w0, top: rc_bar.top, right: rc_bar.right, bottom: rc_bar.bottom };
-
-            let t0 = if l0 < 1.0 {
-                format!("{} ({:.2} MB)", tr("런처", "Launcher", "ランチャー"), l0 * 1024.0)
-            } else {
-                format!("{} ({:.1} GB)", tr("공개", "Public", "公開"), l0)
-            };
-            let t1 = if d.is_unlocked && d.sec_total_bytes > 0 {
-                let u_gb = (d.sec_used_bytes as f64) / 1073741824.0;
-                let f_gb = (d.sec_free_bytes as f64) / 1073741824.0;
-                format!(
-                    "{} ({:.2} GB — {}: {:.2} GB / {}: {:.2} GB)",
-                    tr("보안 영역", "Security", "セキュリティ"),
-                    l1,
-                    tr("사용", "Used", "使用"),
-                    u_gb,
-                    tr("여유", "Free", "空き"),
-                    f_gb
-                )
-            } else {
-                let st_str = if d.is_unlocked {
-                    tr("잠금 해제됨 / 접근 가능", "Unlocked / Accessible", "ロック解除済 / アクセス可能")
+                let t0 = if l0 < 1.0 {
+                    format!("{} ({:.2} MB)", tr("런처", "Launcher", "ランチャー"), l0 * 1024.0)
                 } else {
-                    tr("암호 잠김 / 숨김 상태", "Locked / Hidden", "ロック中 / 非表示")
+                    format!("{} ({:.1} GB)", tr("공개", "Public", "公開"), l0)
                 };
-                format!("{} ({:.2} GB — {})", tr("보안 영역", "Security", "セキュリティ領域"), l1, st_str)
-            };
+                let t1 = if d.is_unlocked && d.sec_total_bytes > 0 {
+                    let u_gb = (d.sec_used_bytes as f64) / 1073741824.0;
+                    let f_gb = (d.sec_free_bytes as f64) / 1073741824.0;
+                    format!(
+                        "{} ({:.2} GB — {}: {:.2} GB / {}: {:.2} GB)",
+                        tr("보안 영역", "Security", "セキュリティ"),
+                        l1,
+                        tr("사용", "Used", "使用"),
+                        u_gb,
+                        tr("여유", "Free", "空き"),
+                        f_gb
+                    )
+                } else {
+                    let st_str = if d.is_unlocked {
+                        tr("잠금 해제됨", "Unlocked", "ロック解除済")
+                    } else {
+                        tr("암호 잠김", "Locked", "ロック中")
+                    };
+                    format!("{} ({:.2} GB — {})", tr("보안 영역", "Security", "セキュリティ領域"), l1, st_str)
+                };
 
+                draw_text_rect(
+                    hdc,
+                    &t0,
+                    RECT { left: rc0.left + sc(4, s), top: rc0.top, right: rc0.right - sc(4, s), bottom: rc0.bottom },
+                    state.font_small_bold,
+                    rgb(255, 255, 255),
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+                draw_text_rect(
+                    hdc,
+                    &t1,
+                    RECT { left: rc1.left + sc(12, s), top: rc1.top, right: rc1.right - sc(8, s), bottom: rc1.bottom },
+                    state.font_small_bold,
+                    rgb(255, 255, 255),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
+        }
+
+        let sec_col = if state.devices.is_empty() {
+            col_sub
+        } else {
+            let d = &state.devices[state.selected_idx];
+            if !d.has_security_lun {
+                if dark { rgb(147, 197, 253) } else { rgb(37, 99, 235) }
+            } else if d.is_unlocked {
+                if dark { rgb(110, 231, 183) } else { rgb(5, 150, 105) }
+            } else if dark {
+                rgb(253, 164, 175)
+            } else {
+                rgb(225, 29, 72)
+            }
+        };
+        let rc_tile2 = RECT {
+            left: sc(236, s),
+            top: sc(222, s),
+            right: rc_card1_right - sc(16, s),
+            bottom: sc(256, s),
+        };
+        draw_circle_dot(hdc, rc_tile2.left + sc(11, s), (rc_tile2.top + rc_tile2.bottom) / 2, sc(3, s), sec_col);
+        draw_text_rect(
+            hdc,
+            &state.sec_state_str,
+            RECT {
+                left: rc_tile2.left + sc(22, s),
+                top: rc_tile2.top,
+                right: rc_tile2.right - sc(10, s),
+                bottom: rc_tile2.bottom,
+            },
+            state.font_bold,
+            sec_col,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+
+        let rc_tile3a = RECT {
+            left: sc(236, s),
+            top: sc(266, s),
+            right: sc(524, s),
+            bottom: sc(300, s),
+        };
+        draw_text_rect(
+            hdc,
+            &state.hint_str,
+            RECT {
+                left: rc_tile3a.left + sc(12, s),
+                top: rc_tile3a.top,
+                right: rc_tile3a.right - sc(8, s),
+                bottom: rc_tile3a.bottom,
+            },
+            state.font_reg,
+            col_sub,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+
+        let retry_col = if !state.devices.is_empty() {
+            let d = &state.devices[state.selected_idx];
+            if !d.is_unlocked && d.effective_retry_remain <= 3 {
+                if dark { rgb(251, 113, 133) } else { rgb(225, 29, 72) }
+            } else if (!d.is_unlocked && d.effective_retry_remain < d.effective_retry_limit) || d.last_intrusion_count > 0 {
+                if dark { rgb(251, 191, 36) } else { rgb(217, 119, 6) }
+            } else {
+                col_sub
+            }
+        } else {
+            col_sub
+        };
+        let rc_tile3b = RECT {
+            left: sc(532, s),
+            top: sc(266, s),
+            right: rc_card1_right - sc(16, s),
+            bottom: sc(300, s),
+        };
+        draw_text_rect(
+            hdc,
+            &state.retry_str,
+            RECT {
+                left: rc_tile3b.left + sc(12, s),
+                top: rc_tile3b.top,
+                right: rc_tile3b.right - sc(8, s),
+                bottom: rc_tile3b.bottom,
+            },
+            state.font_bold,
+            retry_col,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+
+        draw_text_rect(
+            hdc,
+            tr(
+                "잠금 제어 및 드라이브 작업",
+                "Lock Control & Drive Actions",
+                "ロック制御およびドライブ操作",
+            ),
+            RECT { left: sc(247, s), top: sc(337, s), right: rc_card1_right - sc(16, s), bottom: sc(361, s) },
+            state.font_card_hdr,
+            col_hdr,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        draw_text_rect(
+            hdc,
+            tr("비밀번호:", "Password:", "パスワード:"),
+            RECT { left: sc(236, s), top: sc(372, s), right: sc(316, s), bottom: sc(404, s) },
+            state.font_bold,
+            col_label,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let pwd_enabled = !state.devices.is_empty()
+            && state.devices[state.selected_idx].has_security_lun
+            && !state.devices[state.selected_idx].is_unlocked;
+        let (pwd_bg, pwd_ico_col) = if dark {
+            if pwd_enabled {
+                (rgb(30, 30, 30), rgb(96, 205, 255))
+            } else {
+                (rgb(30, 30, 30), rgb(90, 90, 90))
+            }
+        } else if pwd_enabled {
+            (rgb(255, 255, 255), rgb(0, 120, 212))
+        } else {
+            (rgb(243, 243, 243), rgb(160, 160, 160))
+        };
+        draw_button_icon(hdc, ID_BTN_CHANGE_PWD, sc(335, s), sc(388, s), s, pwd_ico_col, pwd_bg);
+    }
+    // ========================================================================
+    // TAB 1: PASSWORD & VAULT SECURITY TEXT OVERLAY
+    // ========================================================================
+    else if state.active_tab == 1 {
+        let rc_card_right = cw - sc(20, s);
+        draw_text_rect(
+            hdc,
+            tr(
+                "비밀번호 및 힌트 변경",
+                "Change Password & Hint",
+                "パスワードおよびヒントの変更",
+            ),
+            RECT { left: sc(247, s), top: sc(147, s), right: rc_card_right - sc(16, s), bottom: sc(171, s) },
+            state.font_card_hdr,
+            col_hdr,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let cur_summary = format!("{}    |    {}", state.hint_str, state.retry_str);
+        draw_text_rect(
+            hdc,
+            &cur_summary,
+            RECT { left: sc(250, s), top: sc(184, s), right: rc_card_right - sc(26, s), bottom: sc(222, s) },
+            state.font_bold,
+            col_label,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+
+        let form_enabled = !state.devices.is_empty() && state.devices[state.selected_idx].has_security_lun;
+        let (inp_bg, ico_c) = if dark {
+            if form_enabled {
+                (rgb(30, 30, 30), rgb(96, 205, 255))
+            } else {
+                (rgb(30, 30, 30), rgb(90, 90, 90))
+            }
+        } else if form_enabled {
+            (rgb(255, 255, 255), rgb(0, 120, 212))
+        } else {
+            (rgb(243, 243, 243), rgb(160, 160, 160))
+        };
+
+        let labels = [
+            (tr("현재 비밀번호:", "Current Password:", "現在のパスワード:"), 250),
+            (tr("새 비밀번호 (4~15자):", "New Password (4-15):", "新しいパスワード (4~15):"), 296),
+            (tr("새 비밀번호 확인:", "Confirm New Password:", "新しいパスワード (確認):"), 342),
+            (tr("새 비밀번호 힌트:", "New Password Hint:", "新しいパスワードヒント:"), 388),
+        ];
+        for &(lbl, y_top) in &labels {
             draw_text_rect(
                 hdc,
-                &t0,
-                RECT { left: rc0.left + sc(4, s), top: rc0.top, right: rc0.right - sc(4, s), bottom: rc0.bottom },
-                state.font_small_bold,
-                rgb(255, 255, 255),
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                lbl,
+                RECT {
+                    left: sc(242, s),
+                    top: sc(y_top, s),
+                    right: sc(412, s),
+                    bottom: sc(y_top + 34, s),
+                },
+                state.font_bold,
+                col_label,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
+            draw_button_icon(hdc, ID_BTN_CHANGE_PWD, sc(433, s), sc(y_top + 17, s), s, ico_c, inp_bg);
+        }
+    }
+    // ========================================================================
+    // TAB 2: DOD 3-PASS FILE SHREDDER TEXT OVERLAY
+    // ========================================================================
+    else if state.active_tab == 2 {
+        let rc_card_right = cw - sc(20, s);
+        draw_text_rect(
+            hdc,
+            tr(
+                "파일 완전삭제 (DoD 3-Pass Shredder)",
+                "3-Pass DoD File Shredder",
+                "ファイル完全削除 (DoD 3-Pass Shredder)",
+            ),
+            RECT { left: sc(247, s), top: sc(147, s), right: rc_card_right - sc(16, s), bottom: sc(171, s) },
+            state.font_card_hdr,
+            col_hdr,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let w_col = if dark { rgb(253, 164, 175) } else { rgb(190, 18, 60) };
+        draw_text_rect(
+            hdc,
+            tr(
+                "⚠️ 3-Pass 덮어쓰기 (0x00 → 0xFF → 난수)  ·  삭제된 파일은 복구할 수 없습니다.",
+                "⚠️ 3-Pass Overwrite (0x00 -> 0xFF -> Random)  ·  Shredded files cannot be recovered.",
+                "⚠️ 3-Pass 上書き (0x00 → 0xFF → 乱数)  ·  削除されたファイルは復元できません。",
+            ),
+            RECT { left: sc(252, s), top: sc(196, s), right: rc_card_right - sc(22, s), bottom: sc(226, s) },
+            state.font_bold,
+            w_col,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        draw_text_rect(
+            hdc,
+            &state.sec_state_str,
+            RECT { left: sc(252, s), top: sc(228, s), right: rc_card_right - sc(22, s), bottom: sc(256, s) },
+            state.font_small_bold,
+            col_label,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+    // ========================================================================
+    // TAB 3: SETTINGS & PREFERENCES TEXT OVERLAY
+    // ========================================================================
+    else if state.active_tab == 3 {
+        let rc_card_right = cw - sc(20, s);
+        draw_text_rect(
+            hdc,
+            tr(
+                "환경 설정",
+                "Preferences",
+                "環境設定",
+            ),
+            RECT { left: sc(247, s), top: sc(147, s), right: rc_card_right - sc(16, s), bottom: sc(171, s) },
+            state.font_card_hdr,
+            col_hdr,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let rows = [
+            (188, tr("자리 비움 자동 잠금 타이머", "Inactivity Auto-Lock Timer", "放置時の自動ロックタイマー")),
+            (254, tr("인터페이스 화면 테마", "Appearance Theme Mode", "インターフェース外観テーマ")),
+            (320, tr("표시 언어 (Display Language)", "Display Language", "表示言語 (Display Language)")),
+            (
+                386,
+                tr(
+                    "보안 영역 아이콘 · Autorun 복구",
+                    "Restore Security Drive Icon & Autorun",
+                    "セキュリティ領域のアイコン・Autorun復元",
+                ),
+            ),
+        ];
+
+        for &(y0, title_s) in &rows {
             draw_text_rect(
                 hdc,
-                &t1,
-                RECT { left: rc1.left + sc(12, s), top: rc1.top, right: rc1.right - sc(8, s), bottom: rc1.bottom },
-                state.font_small_bold,
-                rgb(255, 255, 255),
+                title_s,
+                RECT {
+                    left: sc(254, s),
+                    top: sc(y0, s),
+                    right: sc(656, s),
+                    bottom: sc(y0 + 54, s),
+                },
+                state.font_bold,
+                col_hdr,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         }
     }
+    // ========================================================================
+    // TAB 4: ABOUT / PROGRAM & HARDWARE SPECIFICATIONS TEXT OVERLAY
+    // ========================================================================
+    else {
+        let rc_card_right = cw - sc(20, s);
+        draw_text_rect(
+            hdc,
+            tr(
+                "프로그램 정보 및 하드웨어 제원",
+                "About & Hardware Specifications",
+                "プログラム情報およびハードウェア仕様",
+            ),
+            RECT { left: sc(247, s), top: sc(147, s), right: rc_card_right - sc(16, s), bottom: sc(171, s) },
+            state.font_card_hdr,
+            col_hdr,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
-    // Card 1 Recessed Info Tiles (3 Structured Mini-Pills)
-    let tile_bg = if dark { rgb(15, 23, 42) } else { rgb(248, 250, 252) };
-    let tile_bd = if dark { rgb(39, 52, 73) } else { rgb(226, 232, 240) };
+        let hw_live_str = if state.devices.is_empty() {
+            tr("연결된 장치 없음 (-)", "No device connected (-)", "未接続 (-)").to_string()
+        } else {
+            let d = &state.devices[state.selected_idx];
+            let l0_mb = d.lun_gb(0) * 1024.0;
+            let l1_gb = d.lun_gb(1);
+            format!(
+                "[{}] {} {}  ·  LUN0: {:.2} MB + LUN1: {:.2} GB",
+                d.drive_letter,
+                d.vendor,
+                d.product,
+                l0_mb,
+                l1_gb
+            )
+        };
 
-    // Tile 1: Partition Info Row
-    let rc_tile1 = RECT {
-        left: sc(36, s),
-        top: sc(233, s),
-        right: rc_card1.right - sc(16, s),
-        bottom: sc(258, s),
-    };
-    draw_rounded_box(hdc, &rc_tile1, tile_bg, tile_bd, sc(6, s));
-    draw_circle_dot(hdc, rc_tile1.left + sc(11, s), (rc_tile1.top + rc_tile1.bottom) / 2, sc(3, s), rgb(56, 189, 248));
-    draw_text_rect(
-        hdc,
-        &state.part_info_str,
-        RECT {
-            left: rc_tile1.left + sc(22, s),
-            top: rc_tile1.top,
-            right: rc_tile1.right - sc(10, s),
-            bottom: rc_tile1.bottom,
-        },
-        state.font_reg,
-        col_label,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-    );
+        let info_rows: [(&str, String); 7] = [
+            (
+                tr("프로그램 / 버전", "App / Version", "プログラム / 版"),
+                "IS918 Secure USB Manager  ·  v2.5.5 (x86_64 Static CRT / WinPE)".to_string(),
+            ),
+            (
+                tr("출처 / 제작자", "Source / Author", "出典 / 制作者"),
+                "q20021410  (Open-Source Hardware Security Suite)".to_string(),
+            ),
+            (
+                tr("GitHub 주소", "GitHub Repo", "GitHub URL"),
+                GITHUB_REPO_URL.to_string(),
+            ),
+            (
+                tr("대상 컨트롤러", "Controller", "コントローラ"),
+                "Innostor IS918 / IS918M_GA (USB 3.0 Dual-LUN Controller)".to_string(),
+            ),
+            (
+                tr("연결된 USB 제원", "Connected USB", "接続USB仕様"),
+                hw_live_str,
+            ),
+            (
+                tr("보안 아키텍처", "Security Spec", "セキュリティ仕様"),
+                tr(
+                    "ISO9660 CD-ROM (LUN0) + SCSI 0xE0 잠금 (LUN1) · SHA-256 볼트",
+                    "ISO9660 CD-ROM (LUN0) + SCSI 0xE0 Lock (LUN1) · SHA-256 Vault",
+                    "ISO9660 CD-ROM (LUN0) + SCSI 0xE0 ロック (LUN1) · SHA-256",
+                )
+                .to_string(),
+            ),
+            (
+                tr("방어 정책 / 환경", "Defense / OS", "防御機能 / 環境"),
+                tr(
+                    "10회 오류 시 자동 파기 · DoD 3-Pass 완전삭제 · Win10 / 11 / WinPE",
+                    "10-Try Self-Destruct · DoD 3-Pass Shredder · Win10 / 11 / WinPE",
+                    "10回失敗で自動破棄 · DoD 3-Pass完全削除 · Win10 / 11 / WinPE",
+                )
+                .to_string(),
+            ),
+        ];
 
-    // Tile 2: Tinted Security Status Banner Row
-    let (sec_col, sec_tile_bg, sec_tile_bd) = if state.devices.is_empty() {
-        (col_sub, tile_bg, tile_bd)
-    } else {
-        let d = &state.devices[state.selected_idx];
-        if !d.has_security_lun {
-            if dark {
-                (rgb(96, 165, 250), rgb(15, 29, 58), rgb(37, 99, 235))
+        let key_col = if dark { rgb(96, 205, 255) } else { rgb(0, 103, 192) };
+        for (i, (k_str, v_str)) in info_rows.iter().enumerate() {
+            let y0 = 182 + (i as i32 * 47);
+            let right_lim = if i == 2 {
+                sc(700, s)
             } else {
-                (rgb(37, 99, 235), rgb(239, 246, 255), rgb(191, 219, 254))
-            }
-        } else if d.is_unlocked {
-            if dark {
-                (rgb(52, 211, 153), rgb(6, 46, 36), rgb(16, 185, 129))
-            } else {
-                (rgb(5, 150, 105), rgb(236, 253, 245), rgb(167, 243, 208))
-            }
-        } else if dark {
-            (rgb(251, 113, 133), rgb(55, 12, 28), rgb(190, 18, 60))
-        } else {
-            (rgb(225, 29, 72), rgb(255, 241, 242), rgb(254, 205, 211))
+                rc_card_right - sc(20, s)
+            };
+            draw_text_rect(
+                hdc,
+                k_str,
+                RECT {
+                    left: sc(248, s),
+                    top: sc(y0, s),
+                    right: sc(350, s),
+                    bottom: sc(y0 + 41, s),
+                },
+                state.font_small_bold,
+                key_col,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_text_rect(
+                hdc,
+                v_str,
+                RECT {
+                    left: sc(356, s),
+                    top: sc(y0, s),
+                    right: right_lim,
+                    bottom: sc(y0 + 41, s),
+                },
+                state.font_small,
+                col_hdr,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
         }
-    };
-    let rc_tile2 = RECT {
-        left: sc(36, s),
-        top: sc(262, s),
-        right: rc_card1.right - sc(16, s),
-        bottom: sc(288, s),
-    };
-    draw_rounded_box(hdc, &rc_tile2, sec_tile_bg, sec_tile_bd, sc(6, s));
-    draw_circle_dot(hdc, rc_tile2.left + sc(11, s), (rc_tile2.top + rc_tile2.bottom) / 2, sc(3, s), sec_col);
-    draw_text_rect(
-        hdc,
-        &state.sec_state_str,
-        RECT {
-            left: rc_tile2.left + sc(22, s),
-            top: rc_tile2.top,
-            right: rc_tile2.right - sc(10, s),
-            bottom: rc_tile2.bottom,
-        },
-        state.font_bold,
-        sec_col,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-    );
-
-    // Tile 3A (Left): Password Hint Pill
-    let rc_tile3a = RECT {
-        left: sc(36, s),
-        top: sc(292, s),
-        right: sc(348, s),
-        bottom: sc(317, s),
-    };
-    draw_rounded_box(hdc, &rc_tile3a, tile_bg, tile_bd, sc(6, s));
-    draw_text_rect(
-        hdc,
-        &state.hint_str,
-        RECT {
-            left: rc_tile3a.left + sc(12, s),
-            top: rc_tile3a.top,
-            right: rc_tile3a.right - sc(8, s),
-            bottom: rc_tile3a.bottom,
-        },
-        state.font_reg,
-        col_sub,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-    );
-
-    // Tile 3B (Right): Remaining Retries Pill
-    let retry_col = if !state.devices.is_empty() {
-        let d = &state.devices[state.selected_idx];
-        if !d.is_unlocked && d.effective_retry_remain <= 3 {
-            if dark { rgb(251, 113, 133) } else { rgb(225, 29, 72) }
-        } else if (!d.is_unlocked && d.effective_retry_remain < d.effective_retry_limit) || d.last_intrusion_count > 0 {
-            if dark { rgb(251, 191, 36) } else { rgb(217, 119, 6) }
-        } else {
-            col_sub
-        }
-    } else {
-        col_sub
-    };
-    let rc_tile3b = RECT {
-        left: sc(356, s),
-        top: sc(292, s),
-        right: rc_card1.right - sc(16, s),
-        bottom: sc(317, s),
-    };
-    draw_rounded_box(hdc, &rc_tile3b, tile_bg, tile_bd, sc(6, s));
-    draw_text_rect(
-        hdc,
-        &state.retry_str,
-        RECT {
-            left: rc_tile3b.left + sc(12, s),
-            top: rc_tile3b.top,
-            right: rc_tile3b.right - sc(8, s),
-            bottom: rc_tile3b.bottom,
-        },
-        state.font_bold,
-        retry_col,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-    );
-
-    // 4. Card 2: Authentication, Auto-Lock Timer & Security Tools Panel
-    let rc_card2 = RECT {
-        left: sc(20, s),
-        top: sc(336, s),
-        right: cw - sc(20, s),
-        bottom: sc(520, s),
-    };
-    draw_elevated_card(hdc, &rc_card2, bg_card, border_card, s, dark);
-
-    // Card 2 Header Accent Pill
-    let rc_acc2 = RECT {
-        left: sc(36, s),
-        top: sc(349, s),
-        right: sc(40, s),
-        bottom: sc(366, s),
-    };
-    draw_rounded_box(hdc, &rc_acc2, rgb(56, 189, 248), rgb(56, 189, 248), sc(2, s));
-
-    draw_text_rect(
-        hdc,
-        tr(
-            "보안 영역 제어 · 자동 잠금 타이머 · 파일 완전삭제 도구",
-            "Security Control · Auto-Lock Timer · File Shredder Tools",
-            "セキュリティ制御 ・ 自動ロックタイマー ・ 完全削除ツール",
-        ),
-        RECT { left: sc(47, s), top: sc(345, s), right: rc_card2.right - sc(16, s), bottom: sc(369, s) },
-        state.font_card_hdr,
-        col_hdr,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    draw_text_rect(
-        hdc,
-        tr("비밀번호:", "Password:", "パスワード:"),
-        RECT { left: sc(36, s), top: sc(379, s), right: sc(115, s), bottom: sc(409, s) },
-        state.font_bold,
-        col_label,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    // Modern Rounded Password Input Box with Left Vector Key Icon
-    let pwd_enabled = !state.devices.is_empty()
-        && state.devices[state.selected_idx].has_security_lun
-        && !state.devices[state.selected_idx].is_unlocked;
-    let rc_pwd_box = RECT {
-        left: sc(118, s),
-        top: sc(378, s),
-        right: sc(339, s),
-        bottom: sc(410, s),
-    };
-    let (pwd_bg, pwd_bd, pwd_ico_col) = if dark {
-        if pwd_enabled {
-            (rgb(15, 23, 42), rgb(56, 189, 248), rgb(56, 189, 248))
-        } else {
-            (rgb(15, 23, 42), rgb(51, 65, 85), rgb(71, 85, 105))
-        }
-    } else if pwd_enabled {
-        (rgb(255, 255, 255), rgb(37, 99, 235), rgb(37, 99, 235))
-    } else {
-        (rgb(241, 245, 249), rgb(203, 213, 225), rgb(148, 163, 184))
-    };
-    draw_rounded_box(hdc, &rc_pwd_box, pwd_bg, pwd_bd, sc(8, s));
-    draw_button_icon(hdc, ID_BTN_CHANGE_PWD, sc(132, s), sc(394, s), s, pwd_ico_col, pwd_bg);
-
-    draw_text_rect(
-        hdc,
-        tr("자동 잠금:", "Idle Lock:", "自動ロック:"),
-        RECT { left: sc(415, s), top: sc(379, s), right: sc(526, s), bottom: sc(409, s) },
-        state.font_bold,
-        col_label,
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-    );
+    }
 }
 
 unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
@@ -3512,7 +5217,7 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
             let mem_bmp = CreateCompatibleBitmap(hdc, w, h);
             let old_bmp = SelectObject(mem_dc, mem_bmp as HGDIOBJ);
 
-            if let Some(state) = get_state() {
+            if let Some(state) = get_state_mut() {
                 paint_main_canvas(mem_dc, &rc_client, state);
             }
 
@@ -3538,30 +5243,232 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                     .unwrap_or(false);
 
             let id = dis.ctl_id as usize;
+            let is_nav = id >= ID_NAV_HOME && id <= ID_NAV_ABOUT;
             let is_dropdown = id == ID_CMB_LANG || id == ID_CMB_DEV || id == ID_CMB_IDLE_TIMER;
             let is_secondary = id == ID_BTN_REFRESH
                 || id == ID_BTN_THEME
                 || id == ID_BTN_OPEN_DRV
-                || id == ID_BTN_SHRED
                 || id == ID_BTN_SAFE_EJECT
-                || id == ID_BTN_TO_TRAY;
+                || id == ID_BTN_TO_TRAY
+                || id == ID_BTN_GITHUB
+                || id == ID_BTN_RESTORE_AUTORUN;
+
+            let bw = (dis.rc_item.right - dis.rc_item.left).max(1);
+            let bh = (dis.rc_item.bottom - dis.rc_item.top).max(1);
+
+            let mut rc_w = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetWindowRect(dis.hwnd_item, &mut rc_w);
+            let mut pt_tl = POINT { x: rc_w.left, y: rc_w.top };
+            ScreenToClient(hwnd, &mut pt_tl);
 
             let dark = get_state().map(|s| s.dark_mode).unwrap_or(false);
-            let parent_bg = if id == ID_BTN_REFRESH || id == ID_CMB_LANG || id == ID_CMB_DEV || id == ID_BTN_THEME {
-                if dark { rgb(11, 17, 32) } else { rgb(241, 245, 249) }
+            let fallback_bg = if is_nav || id == ID_BTN_TO_TRAY {
+                if dark { rgb(32, 32, 32) } else { rgb(243, 243, 243) }
             } else if dark {
-                rgb(23, 33, 51)
+                rgb(44, 44, 44)
             } else {
-                rgb(255, 255, 255)
+                rgb(249, 249, 249)
             };
-            fill_solid_rect(dis.hdc, &dis.rc_item, parent_bg);
+
+            let mut btn_buf = if let Some(state) = get_state() {
+                fluent_extract_sub_buffer(
+                    &state.bg_pixels,
+                    state.bg_w,
+                    state.bg_h,
+                    pt_tl.x,
+                    pt_tl.y,
+                    bw,
+                    bh,
+                    fallback_bg,
+                )
+            } else {
+                vec![pack_bgra(32, 32, 32); (bw * bh) as usize]
+            };
+
+            let rc_local = RECT { left: 0, top: 0, right: bw, bottom: bh };
+            let local_mx = get_state().map(|s| (s.cursor_client.x - pt_tl.x) as f32).unwrap_or(-999.0);
+            let local_my = get_state().map(|s| (s.cursor_client.y - pt_tl.y) as f32).unwrap_or(-999.0);
+
+            if is_nav {
+                if let Some(state) = get_state() {
+                    let s = state.dpi_scale;
+                    let nav_idx = id - ID_NAV_HOME;
+                    let is_active = state.active_tab == nav_idx;
+
+                    // Official WinUI 3 NavigationViewItem tokens:
+                    // Selected: SubtleFillColorSecondary (#0Fffffff in dark mode, #09000000 in light mode)
+                    // PointerOver: SubtleFillColorTertiary (#0Affffff in dark mode, #06000000 in light mode)
+                    let (txt_c, ico_c, ico_bg) = if is_active {
+                        if dark {
+                            fluent_draw_glass_box(
+                                &mut btn_buf,
+                                bw,
+                                bh,
+                                &rc_local,
+                                sc(6, s) as f32,
+                                rgb(52, 52, 52),
+                                rgb(46, 46, 46),
+                                0.85,
+                                rgb(90, 90, 90),
+                                rgb(62, 62, 62),
+                                0.50,
+                                rgb(96, 205, 255),
+                                0.0,
+                                0.0,
+                                0.0,
+                            );
+                            fluent_apply_reveal_highlight(
+                                &mut btn_buf,
+                                bw,
+                                bh,
+                                &rc_local,
+                                sc(6, s) as f32,
+                                local_mx,
+                                local_my,
+                                sc(95, s) as f32,
+                                rgb(96, 205, 255),
+                                0.08,
+                                0.45,
+                            );
+                            (rgb(255, 255, 255), rgb(96, 205, 255), rgb(48, 48, 48))
+                        } else {
+                            fluent_draw_glass_box(
+                                &mut btn_buf,
+                                bw,
+                                bh,
+                                &rc_local,
+                                sc(6, s) as f32,
+                                rgb(234, 234, 234),
+                                rgb(228, 228, 228),
+                                0.90,
+                                rgb(210, 210, 210),
+                                rgb(200, 200, 200),
+                                0.65,
+                                rgb(0, 120, 212),
+                                0.0,
+                                0.0,
+                                0.0,
+                            );
+                            (rgb(26, 26, 26), rgb(0, 120, 212), rgb(232, 232, 232))
+                        }
+                    } else if is_hovered || is_pressed {
+                        if dark {
+                            fluent_draw_glass_box(
+                                &mut btn_buf,
+                                bw,
+                                bh,
+                                &rc_local,
+                                sc(6, s) as f32,
+                                rgb(45, 45, 45),
+                                rgb(40, 40, 40),
+                                0.72,
+                                rgb(80, 80, 80),
+                                rgb(55, 55, 55),
+                                0.40,
+                                rgb(96, 205, 255),
+                                0.0,
+                                0.0,
+                                0.0,
+                            );
+                            fluent_apply_reveal_highlight(
+                                &mut btn_buf,
+                                bw,
+                                bh,
+                                &rc_local,
+                                sc(6, s) as f32,
+                                local_mx,
+                                local_my,
+                                sc(95, s) as f32,
+                                rgb(255, 255, 255),
+                                0.07,
+                                0.40,
+                            );
+                            (rgb(255, 255, 255), rgb(96, 205, 255), rgb(42, 42, 42))
+                        } else {
+                            fluent_draw_glass_box(
+                                &mut btn_buf,
+                                bw,
+                                bh,
+                                &rc_local,
+                                sc(6, s) as f32,
+                                rgb(238, 238, 238),
+                                rgb(233, 233, 233),
+                                0.78,
+                                rgb(215, 215, 215),
+                                rgb(205, 205, 205),
+                                0.55,
+                                rgb(0, 120, 212),
+                                0.0,
+                                0.0,
+                                0.0,
+                            );
+                            (rgb(26, 26, 26), rgb(0, 120, 212), rgb(235, 235, 235))
+                        }
+                    } else if dark {
+                        (rgb(200, 200, 200), rgb(180, 180, 180), rgb(32, 32, 32))
+                    } else {
+                        (rgb(92, 92, 92), rgb(92, 92, 92), rgb(243, 243, 243))
+                    };
+
+                    if is_active {
+                        // Official WinUI 3 NavigationView Selection Indicator Pill (3px wide, 16px tall, #60CDFF / #0078D4)
+                        let pill_col = if dark { rgb(96, 205, 255) } else { rgb(0, 120, 212) };
+                        let rc_ind = RECT {
+                            left: sc(2, s),
+                            top: sc(12, s),
+                            right: sc(5, s),
+                            bottom: bh - sc(12, s),
+                        };
+                        fluent_draw_glass_box(
+                            &mut btn_buf,
+                            bw,
+                            bh,
+                            &rc_ind,
+                            sc(2, s) as f32,
+                            pill_col,
+                            pill_col,
+                            1.0,
+                            pill_col,
+                            pill_col,
+                            1.0,
+                            pill_col,
+                            sc(5, s) as f32,
+                            if dark { 0.45 } else { 0.15 },
+                            0.0,
+                        );
+                    }
+
+                    blit_bgra_buffer(dis.hdc, bw, bh, &btn_buf);
+
+                    let cy = bh / 2;
+                    let cx = sc(24, s);
+                    draw_button_icon(dis.hdc, id, cx, cy, s, ico_c, ico_bg);
+
+                    let rc_txt = RECT {
+                        left: sc(42, s),
+                        top: 0,
+                        right: bw - sc(8, s),
+                        bottom: bh,
+                    };
+                    let f = if is_active { state.font_bold } else { state.font_reg };
+                    draw_text_rect(
+                        dis.hdc,
+                        &text,
+                        rc_txt,
+                        f,
+                        txt_c,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    );
+                }
+                return 1;
+            }
 
             if id == ID_CHK_SHOW_PWD {
                 if let Some(state) = get_state() {
                     let s = state.dpi_scale;
-                    let box_sz = sc(16, s);
-                    let bx = dis.rc_item.left + sc(2, s);
-                    let by = dis.rc_item.top + ((dis.rc_item.bottom - dis.rc_item.top) - box_sz) / 2;
+                    let box_sz = sc(18, s);
+                    let bx = sc(2, s);
+                    let by = (bh - box_sz) / 2;
                     let rc_box = RECT {
                         left: bx,
                         top: by,
@@ -3569,37 +5476,76 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                         bottom: by + box_sz,
                     };
 
-                    let (box_bg, box_bd) = if state.show_pwd {
-                        (rgb(37, 99, 235), rgb(96, 165, 250))
-                    } else if is_hovered {
-                        if dark {
-                            (rgb(30, 41, 59), rgb(56, 189, 248))
-                        } else {
-                            (rgb(239, 246, 255), rgb(37, 99, 235))
-                        }
-                    } else if dark {
-                        (rgb(15, 23, 42), rgb(100, 116, 139))
+                    if state.show_pwd {
+                        // WinUI 3 CheckBox Checked state: AccentFillColorDefault (#60CDFF Dark / #0078D4 Light)
+                        let acc_c = if dark { rgb(96, 205, 255) } else { rgb(0, 120, 212) };
+                        fluent_draw_glass_box(
+                            &mut btn_buf,
+                            bw,
+                            bh,
+                            &rc_box,
+                            sc(4, s) as f32,
+                            acc_c,
+                            acc_c,
+                            0.98,
+                            acc_c,
+                            acc_c,
+                            0.98,
+                            acc_c,
+                            sc(5, s) as f32,
+                            0.30,
+                            0.0,
+                        );
                     } else {
-                        (rgb(255, 255, 255), rgb(148, 163, 184))
-                    };
-                    draw_rounded_box(dis.hdc, &rc_box, box_bg, box_bd, sc(4, s));
+                        let (b_top, b_rim) = if is_hovered {
+                            if dark {
+                                (rgb(52, 52, 52), rgb(160, 160, 160))
+                            } else {
+                                (rgb(236, 236, 236), rgb(110, 110, 110))
+                            }
+                        } else if dark {
+                            (rgb(36, 36, 36), rgb(138, 138, 138))
+                        } else {
+                            (rgb(245, 245, 245), rgb(138, 138, 138))
+                        };
+                        fluent_draw_glass_box(
+                            &mut btn_buf,
+                            bw,
+                            bh,
+                            &rc_box,
+                            sc(4, s) as f32,
+                            b_top,
+                            b_top,
+                            0.90,
+                            b_rim,
+                            b_rim,
+                            0.90,
+                            rgb(96, 205, 255),
+                            0.0,
+                            0.0,
+                            0.0,
+                        );
+                    }
+
+                    blit_bgra_buffer(dis.hdc, bw, bh, &btn_buf);
 
                     if state.show_pwd {
-                        let pen_chk = CreatePen(PS_SOLID, sc(2, s).max(2), rgb(255, 255, 255));
+                        let chk_col = if dark { rgb(16, 16, 16) } else { rgb(255, 255, 255) };
+                        let pen_chk = CreatePen(PS_SOLID, sc(2, s).max(2), chk_col);
                         let op = SelectObject(dis.hdc, pen_chk as HGDIOBJ);
-                        MoveToEx(dis.hdc, bx + sc(3, s), by + sc(8, s), null_mut());
-                        LineTo(dis.hdc, bx + sc(7, s), by + sc(12, s));
-                        LineTo(dis.hdc, bx + sc(13, s), by + sc(4, s));
+                        MoveToEx(dis.hdc, bx + sc(4, s), by + sc(9, s), null_mut());
+                        LineTo(dis.hdc, bx + sc(8, s), by + sc(13, s));
+                        LineTo(dis.hdc, bx + sc(14, s), by + sc(5, s));
                         SelectObject(dis.hdc, op);
                         DeleteObject(pen_chk as HGDIOBJ);
                     }
 
-                    let txt_col = if dark { rgb(241, 245, 249) } else { rgb(30, 41, 59) };
+                    let txt_col = if dark { rgb(245, 245, 245) } else { rgb(26, 26, 26) };
                     let rc_txt = RECT {
-                        left: bx + box_sz + sc(6, s),
-                        top: dis.rc_item.top,
-                        right: dis.rc_item.right,
-                        bottom: dis.rc_item.bottom,
+                        left: bx + box_sz + sc(7, s),
+                        top: 0,
+                        right: bw,
+                        bottom: bh,
                     };
                     draw_text_rect(
                         dis.hdc,
@@ -3616,31 +5562,138 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
             if is_dropdown {
                 if let Some(state) = get_state() {
                     let s = state.dpi_scale;
-                    let (bg_col, border_col, txt_col, badge_bg, arrow_col) = if dark {
+                    // Official WinUI 3 ComboBox / DropDownButton tokens:
+                    // ControlFillColorDefault (#0FFFFFFF / #383838 in Dark), ControlElevationBorderBrush
+                    let (top_c, bot_c, rim_t, rim_b, txt_col, badge_bg, arrow_col, f_alpha) = if dark {
                         if is_pressed {
-                            (rgb(30, 58, 138), rgb(96, 165, 250), rgb(248, 250, 252), rgb(37, 99, 235), rgb(255, 255, 255))
+                            (
+                                rgb(44, 44, 44),
+                                rgb(40, 40, 40),
+                                rgb(90, 90, 90),
+                                rgb(70, 70, 70),
+                                rgb(206, 206, 206),
+                                rgb(34, 34, 34),
+                                rgb(96, 205, 255),
+                                0.90,
+                            )
                         } else if is_hovered {
-                            (rgb(38, 52, 74), rgb(56, 189, 248), rgb(255, 255, 255), rgb(30, 41, 59), rgb(125, 211, 252))
+                            (
+                                rgb(64, 64, 64),
+                                rgb(58, 58, 58),
+                                rgb(125, 125, 125),
+                                rgb(82, 82, 82),
+                                rgb(255, 255, 255),
+                                rgb(48, 48, 48),
+                                rgb(96, 205, 255),
+                                0.88,
+                            )
                         } else {
-                            (rgb(30, 41, 59), rgb(71, 85, 105), rgb(248, 250, 252), rgb(15, 23, 42), rgb(56, 189, 248))
+                            (
+                                rgb(55, 55, 55),
+                                rgb(49, 49, 49),
+                                rgb(105, 105, 105),
+                                rgb(68, 68, 68),
+                                rgb(255, 255, 255),
+                                rgb(38, 38, 38),
+                                rgb(200, 200, 200),
+                                0.84,
+                            )
                         }
                     } else if is_pressed {
-                        (rgb(239, 246, 255), rgb(37, 99, 235), rgb(15, 23, 42), rgb(219, 234, 254), rgb(37, 99, 235))
+                        (
+                            rgb(242, 242, 242),
+                            rgb(236, 236, 236),
+                            rgb(195, 195, 195),
+                            rgb(175, 175, 175),
+                            rgb(96, 96, 96),
+                            rgb(228, 228, 228),
+                            rgb(0, 120, 212),
+                            0.94,
+                        )
                     } else if is_hovered {
-                        (rgb(248, 250, 252), rgb(59, 130, 246), rgb(15, 23, 42), rgb(224, 242, 254), rgb(37, 99, 235))
+                        (
+                            rgb(252, 252, 252),
+                            rgb(246, 246, 246),
+                            rgb(205, 205, 205),
+                            rgb(165, 165, 165),
+                            rgb(26, 26, 26),
+                            rgb(236, 236, 236),
+                            rgb(0, 120, 212),
+                            0.94,
+                        )
                     } else {
-                        (rgb(255, 255, 255), rgb(148, 163, 184), rgb(15, 23, 42), rgb(241, 245, 249), rgb(37, 99, 235))
+                        (
+                            rgb(255, 255, 255),
+                            rgb(250, 250, 250),
+                            rgb(218, 218, 218),
+                            rgb(180, 180, 180),
+                            rgb(26, 26, 26),
+                            rgb(243, 243, 243),
+                            rgb(96, 96, 96),
+                            0.90,
+                        )
                     };
-                    draw_rounded_box(dis.hdc, &dis.rc_item, bg_col, border_col, sc(8, s));
+
+                    fluent_draw_glass_box(
+                        &mut btn_buf,
+                        bw,
+                        bh,
+                        &rc_local,
+                        sc(4, s) as f32,
+                        top_c,
+                        bot_c,
+                        f_alpha,
+                        rim_t,
+                        rim_b,
+                        0.78,
+                        rgb(96, 205, 255),
+                        0.0,
+                        0.0,
+                        0.0,
+                    );
+                    if is_hovered {
+                        fluent_apply_reveal_highlight(
+                            &mut btn_buf,
+                            bw,
+                            bh,
+                            &rc_local,
+                            sc(4, s) as f32,
+                            local_mx,
+                            local_my,
+                            sc(110, s) as f32,
+                            rgb(96, 205, 255),
+                            0.06,
+                            0.45,
+                        );
+                    }
 
                     let arrow_w = sc(28, s);
                     let rc_badge = RECT {
-                        left: dis.rc_item.right - arrow_w,
-                        top: dis.rc_item.top + sc(3, s),
-                        right: dis.rc_item.right - sc(3, s),
-                        bottom: dis.rc_item.bottom - sc(3, s),
+                        left: bw - arrow_w,
+                        top: sc(3, s),
+                        right: bw - sc(3, s),
+                        bottom: bh - sc(3, s),
                     };
-                    draw_rounded_box(dis.hdc, &rc_badge, badge_bg, badge_bg, sc(6, s));
+                    fluent_draw_glass_box(
+                        &mut btn_buf,
+                        bw,
+                        bh,
+                        &rc_badge,
+                        sc(3, s) as f32,
+                        badge_bg,
+                        badge_bg,
+                        0.75,
+                        rim_t,
+                        rim_b,
+                        0.25,
+                        rgb(96, 205, 255),
+                        0.0,
+                        0.0,
+                        0.0,
+                    );
+
+                    blit_bgra_buffer(dis.hdc, bw, bh, &btn_buf);
+
                     draw_text_rect(
                         dis.hdc,
                         "▾",
@@ -3650,155 +5703,155 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                     );
 
-                    let mut txt_left = dis.rc_item.left + sc(10, s);
+                    let mut txt_left = sc(10, s);
                     if id == ID_CMB_LANG {
                         let fw = sc(22, s);
                         let fh = sc(15, s);
-                        let fx = dis.rc_item.left + sc(11, s);
-                        let fy = dis.rc_item.top + ((dis.rc_item.bottom - dis.rc_item.top) - fh) / 2;
+                        let fx = sc(11, s);
+                        let fy = (bh - fh) / 2;
                         draw_flag_icon(dis.hdc, fx, fy, fw, fh, CURRENT_LANG);
                         txt_left = fx + fw + sc(6, s);
                     } else if id == ID_CMB_DEV {
                         let dot_col = if state.devices.is_empty() {
                             rgb(148, 163, 184)
                         } else if state.devices[state.selected_idx].is_unlocked {
-                            rgb(52, 211, 153)
+                            rgb(108, 203, 95)
                         } else {
-                            rgb(251, 113, 133)
+                            rgb(255, 153, 164)
                         };
-                        let cy = (dis.rc_item.top + dis.rc_item.bottom) / 2;
-                        draw_circle_dot(dis.hdc, dis.rc_item.left + sc(14, s), cy, sc(4, s), dot_col);
-                        txt_left = dis.rc_item.left + sc(26, s);
+                        let cy = bh / 2;
+                        draw_circle_dot(dis.hdc, sc(14, s), cy, sc(4, s), dot_col);
+                        txt_left = sc(26, s);
                     }
 
                     let rc_txt = RECT {
                         left: txt_left,
-                        top: dis.rc_item.top,
-                        right: dis.rc_item.right - arrow_w - sc(2, s),
-                        bottom: dis.rc_item.bottom,
+                        top: 0,
+                        right: bw - arrow_w - sc(2, s),
+                        bottom: bh,
                     };
-                    let f = if id == ID_CMB_DEV { state.font_bold } else { state.font_small_bold };
+                    let f = state.font_small_bold;
                     let align = if id == ID_CMB_DEV {
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
                     } else {
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE
                     };
-                    draw_text_rect(
-                        dis.hdc,
-                        &text,
-                        rc_txt,
-                        f,
-                        txt_col,
-                        align,
-                    );
+                    draw_text_rect(dis.hdc, &text, rc_txt, f, txt_col, align);
                 }
                 return 1;
             }
 
-            let (bg_col, border_col, txt_col, hi_col) = if is_secondary {
+            // Official WinUI 3 Standard Button vs AccentButtonStyle
+            let (top_c, bot_c, rim_t, rim_b, txt_col, f_alpha, r_alpha) = if is_secondary {
                 if is_disabled {
                     if dark {
-                        (rgb(23, 33, 51), rgb(39, 52, 73), rgb(71, 85, 105), rgb(30, 41, 59))
+                        (rgb(42, 42, 42), rgb(38, 38, 38), rgb(64, 64, 64), rgb(52, 52, 52), rgb(110, 110, 110), 0.55, 0.40)
                     } else {
-                        (rgb(241, 245, 249), rgb(203, 213, 225), rgb(148, 163, 184), rgb(248, 250, 252))
-                    }
-                } else if id == ID_BTN_SHRED {
-                    if dark {
-                        if is_pressed {
-                            (rgb(136, 19, 55), rgb(244, 63, 94), rgb(255, 241, 242), rgb(190, 18, 60))
-                        } else if is_hovered {
-                            (rgb(105, 12, 38), rgb(251, 113, 133), rgb(255, 241, 242), rgb(159, 18, 57))
-                        } else {
-                            (rgb(68, 10, 26), rgb(190, 18, 60), rgb(253, 164, 175), rgb(110, 18, 45))
-                        }
-                    } else if is_pressed {
-                        (rgb(254, 226, 226), rgb(225, 29, 72), rgb(159, 18, 57), rgb(254, 205, 211))
-                    } else if is_hovered {
-                        (rgb(254, 226, 226), rgb(244, 63, 94), rgb(190, 18, 60), rgb(255, 255, 255))
-                    } else {
-                        (rgb(255, 241, 242), rgb(251, 113, 133), rgb(190, 18, 60), rgb(255, 255, 255))
+                        (rgb(245, 245, 245), rgb(240, 240, 240), rgb(218, 218, 218), rgb(210, 210, 210), rgb(160, 160, 160), 0.70, 0.55)
                     }
                 } else if dark {
                     if is_pressed {
-                        (rgb(51, 65, 85), rgb(96, 165, 250), rgb(255, 255, 255), rgb(71, 85, 105))
+                        (rgb(45, 45, 45), rgb(41, 41, 41), rgb(86, 86, 86), rgb(68, 68, 68), rgb(206, 206, 206), 0.88, 0.75)
                     } else if is_hovered {
-                        (rgb(51, 65, 85), rgb(56, 189, 248), rgb(255, 255, 255), rgb(100, 116, 139))
+                        (rgb(64, 64, 64), rgb(58, 58, 58), rgb(125, 125, 125), rgb(82, 82, 82), rgb(255, 255, 255), 0.86, 0.82)
                     } else {
-                        (rgb(38, 52, 74), rgb(71, 85, 105), rgb(241, 245, 249), rgb(64, 82, 112))
+                        (rgb(55, 55, 55), rgb(49, 49, 49), rgb(105, 105, 105), rgb(68, 68, 68), rgb(255, 255, 255), 0.82, 0.72)
                     }
                 } else if is_pressed {
-                    (rgb(226, 232, 240), rgb(100, 116, 139), rgb(15, 23, 42), rgb(241, 245, 249))
+                    (rgb(240, 240, 240), rgb(235, 235, 235), rgb(195, 195, 195), rgb(175, 175, 175), rgb(96, 96, 96), 0.92, 0.80)
                 } else if is_hovered {
-                    (rgb(239, 246, 255), rgb(59, 130, 246), rgb(29, 78, 216), rgb(255, 255, 255))
+                    (rgb(250, 250, 250), rgb(244, 244, 244), rgb(205, 205, 205), rgb(165, 165, 165), rgb(26, 26, 26), 0.92, 0.85)
                 } else {
-                    (rgb(248, 250, 252), rgb(148, 163, 184), rgb(30, 41, 59), rgb(255, 255, 255))
+                    (rgb(255, 255, 255), rgb(250, 250, 250), rgb(218, 218, 218), rgb(180, 180, 180), rgb(26, 26, 26), 0.88, 0.78)
                 }
             } else if is_disabled {
                 if dark {
-                    (rgb(30, 41, 59), rgb(51, 65, 85), rgb(100, 116, 139), rgb(44, 58, 82))
+                    (rgb(45, 45, 45), rgb(40, 40, 40), rgb(68, 68, 68), rgb(54, 54, 54), rgb(115, 115, 115), 0.60, 0.45)
                 } else {
-                    (rgb(226, 232, 240), rgb(203, 213, 225), rgb(148, 163, 184), rgb(241, 245, 249))
+                    (rgb(236, 236, 236), rgb(230, 230, 230), rgb(212, 212, 212), rgb(198, 198, 198), rgb(160, 160, 160), 0.75, 0.55)
                 }
             } else {
                 match id {
-                    ID_BTN_UNLOCK => {
-                        if is_pressed {
-                            (rgb(29, 78, 216), rgb(30, 64, 175), rgb(255, 255, 255), rgb(59, 130, 246))
+                    ID_BTN_UNLOCK | ID_BTN_CHANGE_PWD => {
+                        // Official WinUI 3 AccentButtonStyle:
+                        // Dark Theme uses bright AccentLight2 (#60CDFF) with dark text (#101010)!
+                        // Light Theme uses AccentBase (#0078D4) with white text (#FFFFFF)!
+                        if dark {
+                            if is_pressed {
+                                (rgb(62, 168, 224), rgb(52, 152, 208), rgb(130, 215, 255), rgb(44, 138, 192), rgb(18, 24, 32), 0.96, 0.92)
+                            } else if is_hovered {
+                                (rgb(122, 215, 255), rgb(98, 205, 255), rgb(198, 240, 255), rgb(74, 184, 240), rgb(12, 18, 26), 0.96, 0.96)
+                            } else {
+                                (rgb(96, 205, 255), rgb(76, 190, 245), rgb(172, 230, 255), rgb(56, 168, 225), rgb(12, 18, 26), 0.94, 0.92)
+                            }
+                        } else if is_pressed {
+                            (rgb(0, 95, 170), rgb(0, 82, 150), rgb(60, 145, 220), rgb(0, 68, 128), rgb(255, 255, 255), 0.96, 0.92)
                         } else if is_hovered {
-                            (rgb(59, 130, 246), rgb(147, 197, 253), rgb(255, 255, 255), rgb(147, 197, 253))
+                            (rgb(16, 132, 224), rgb(0, 114, 204), rgb(110, 188, 255), rgb(0, 95, 175), rgb(255, 255, 255), 0.95, 0.95)
                         } else {
-                            (rgb(37, 99, 235), rgb(59, 130, 246), rgb(255, 255, 255), rgb(96, 165, 250))
+                            (rgb(0, 120, 212), rgb(0, 103, 192), rgb(82, 168, 242), rgb(0, 86, 164), rgb(255, 255, 255), 0.94, 0.90)
                         }
                     }
-                    ID_BTN_LOCK => {
+                    ID_BTN_LOCK | ID_BTN_SHRED => {
                         if is_pressed {
-                            (rgb(190, 18, 60), rgb(159, 18, 57), rgb(255, 255, 255), rgb(225, 29, 72))
+                            (rgb(164, 34, 22), rgb(138, 28, 18), rgb(245, 130, 140), rgb(120, 22, 14), rgb(255, 255, 255), 0.96, 0.92)
                         } else if is_hovered {
-                            (rgb(244, 63, 94), rgb(253, 164, 175), rgb(255, 255, 255), rgb(253, 164, 175))
+                            (rgb(220, 58, 42), rgb(196, 43, 28), rgb(255, 178, 186), rgb(164, 34, 22), rgb(255, 255, 255), 0.95, 0.95)
                         } else {
-                            (rgb(225, 29, 72), rgb(244, 63, 94), rgb(255, 255, 255), rgb(251, 113, 133))
+                            (rgb(196, 43, 28), rgb(168, 35, 22), rgb(255, 153, 164), rgb(142, 28, 18), rgb(255, 255, 255), 0.92, 0.90)
                         }
                     }
-                    ID_BTN_CHANGE_PWD => {
-                        if is_pressed {
-                            (rgb(180, 83, 9), rgb(146, 64, 14), rgb(255, 255, 255), rgb(217, 119, 6))
-                        } else if is_hovered {
-                            (rgb(245, 158, 11), rgb(253, 224, 71), rgb(255, 255, 255), rgb(253, 224, 71))
-                        } else {
-                            (rgb(217, 119, 6), rgb(245, 158, 11), rgb(255, 255, 255), rgb(251, 191, 36))
-                        }
-                    }
-                    _ => (rgb(71, 85, 105), rgb(51, 65, 85), rgb(255, 255, 255), rgb(100, 116, 139)),
+                    _ => (rgb(64, 64, 64), rgb(52, 52, 52), rgb(120, 120, 120), rgb(72, 72, 72), rgb(255, 255, 255), 0.85, 0.80),
                 }
             };
 
             if let Some(state) = get_state() {
                 let s = state.dpi_scale;
-                let rad = sc(8, s);
-                draw_rounded_box(dis.hdc, &dis.rc_item, bg_col, border_col, rad);
-
-                // Top inner specular highlight line
-                if !is_disabled {
-                    let rc_hi = RECT {
-                        left: dis.rc_item.left + sc(6, s),
-                        top: dis.rc_item.top + 1,
-                        right: dis.rc_item.right - sc(6, s),
-                        bottom: dis.rc_item.top + 2,
-                    };
-                    fill_solid_rect(dis.hdc, &rc_hi, hi_col);
+                fluent_draw_glass_box(
+                    &mut btn_buf,
+                    bw,
+                    bh,
+                    &rc_local,
+                    sc(4, s) as f32,
+                    top_c,
+                    bot_c,
+                    f_alpha,
+                    rim_t,
+                    rim_b,
+                    r_alpha,
+                    top_c,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+                if is_hovered && !is_disabled {
+                    fluent_apply_reveal_highlight(
+                        &mut btn_buf,
+                        bw,
+                        bh,
+                        &rc_local,
+                        sc(4, s) as f32,
+                        local_mx,
+                        local_my,
+                        sc(120, s) as f32,
+                        rgb(255, 255, 255),
+                        0.08,
+                        0.50,
+                    );
                 }
+                blit_bgra_buffer(dis.hdc, bw, bh, &btn_buf);
 
                 let f = if is_secondary { state.font_small_bold } else { state.font_bold };
-                let cy = (dis.rc_item.top + dis.rc_item.bottom) / 2;
+                let cy = bh / 2;
 
                 if id == ID_BTN_THEME {
-                    let cx = dis.rc_item.left + sc(16, s);
-                    draw_theme_icon(dis.hdc, cx, cy, s, state.dark_mode, bg_col);
+                    let cx = sc(16, s);
+                    draw_theme_icon(dis.hdc, cx, cy, s, state.dark_mode, bot_c);
                     let rc_t = RECT {
-                        left: dis.rc_item.left + sc(26, s),
-                        top: dis.rc_item.top,
-                        right: dis.rc_item.right - sc(4, s),
-                        bottom: dis.rc_item.bottom,
+                        left: sc(26, s),
+                        top: 0,
+                        right: bw - sc(4, s),
+                        bottom: bh,
                     };
                     draw_text_rect(
                         dis.hdc,
@@ -3809,17 +5862,13 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                     );
                 } else {
-                    let ico_x = if is_secondary {
-                        dis.rc_item.left + sc(17, s)
-                    } else {
-                        dis.rc_item.left + sc(24, s)
-                    };
-                    draw_button_icon(dis.hdc, id, ico_x, cy, s, txt_col, bg_col);
+                    let ico_x = if is_secondary { sc(17, s) } else { sc(24, s) };
+                    draw_button_icon(dis.hdc, id, ico_x, cy, s, txt_col, bot_c);
                     let rc_t = RECT {
-                        left: dis.rc_item.left + if is_secondary { sc(25, s) } else { sc(32, s) },
-                        top: dis.rc_item.top,
-                        right: dis.rc_item.right - sc(4, s),
-                        bottom: dis.rc_item.bottom,
+                        left: if is_secondary { sc(25, s) } else { sc(32, s) },
+                        top: 0,
+                        right: bw - sc(4, s),
+                        bottom: bh,
                     };
                     draw_text_rect(
                         dis.hdc,
@@ -3837,12 +5886,12 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
             let hdc = w_param as HDC;
             if let Some(state) = get_state() {
                 if state.dark_mode {
-                    SetBkColor(hdc, rgb(15, 23, 42));
-                    SetTextColor(hdc, rgb(248, 250, 252));
+                    SetBkColor(hdc, rgb(30, 30, 30));
+                    SetTextColor(hdc, rgb(255, 255, 255));
                     return state.br_edit_dark as LRESULT;
                 } else {
                     SetBkColor(hdc, rgb(255, 255, 255));
-                    SetTextColor(hdc, rgb(15, 23, 42));
+                    SetTextColor(hdc, rgb(26, 26, 26));
                     return state.br_card as LRESULT;
                 }
             }
@@ -3852,24 +5901,29 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
             let hdc = w_param as HDC;
             let ctrl_hwnd = l_param as HWND;
             if let Some(state) = get_state() {
-                // Disabled EDIT control sends WM_CTLCOLORSTATIC
-                if !state.txt_pwd.is_null() && ctrl_hwnd == state.txt_pwd {
+                let is_edit_ctrl = !ctrl_hwnd.is_null()
+                    && (ctrl_hwnd == state.txt_pwd
+                        || ctrl_hwnd == state.txt_curr_pwd
+                        || ctrl_hwnd == state.txt_new_pwd
+                        || ctrl_hwnd == state.txt_conf_pwd
+                        || ctrl_hwnd == state.txt_new_hint);
+                if is_edit_ctrl {
                     if state.dark_mode {
-                        SetBkColor(hdc, rgb(15, 23, 42));
-                        SetTextColor(hdc, rgb(100, 116, 139));
+                        SetBkColor(hdc, rgb(30, 30, 30));
+                        SetTextColor(hdc, rgb(130, 130, 130));
                         return state.br_edit_dark as LRESULT;
                     } else {
-                        SetBkColor(hdc, rgb(241, 245, 249));
-                        SetTextColor(hdc, rgb(148, 163, 184));
+                        SetBkColor(hdc, rgb(243, 243, 243));
+                        SetTextColor(hdc, rgb(150, 150, 150));
                         return state.br_edit_light_dis as LRESULT;
                     }
                 }
                 SetBkMode(hdc, TRANSPARENT);
                 if state.dark_mode {
-                    SetTextColor(hdc, rgb(226, 232, 240));
+                    SetTextColor(hdc, rgb(232, 232, 232));
                     return state.br_card_dark as LRESULT;
                 } else {
-                    SetTextColor(hdc, rgb(30, 41, 59));
+                    SetTextColor(hdc, rgb(26, 26, 26));
                     return state.br_card as LRESULT;
                 }
             }
@@ -3912,7 +5966,18 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                 if let Some(state) = get_state_mut() {
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
+                    let mut pt_cl = pt;
+                    ScreenToClient(hwnd, &mut pt_cl);
+                    let cur_focus = GetFocus();
+
                     let ctrls = [
+                        state.nav_home,
+                        state.nav_pwd,
+                        state.nav_shred,
+                        state.nav_settings,
+                        state.nav_about,
+                        state.btn_github,
+                        state.btn_restore_autorun,
                         state.btn_theme,
                         state.cmb_lang,
                         state.cmb_dev,
@@ -3929,7 +5994,7 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                     ];
                     let mut new_hover: HWND = null_mut();
                     for &c in &ctrls {
-                        if !c.is_null() {
+                        if !c.is_null() && IsWindowVisible(c) != 0 {
                             let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                             GetWindowRect(c, &mut rc);
                             if pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom {
@@ -3938,15 +6003,35 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                             }
                         }
                     }
+
+                    let mut need_canvas_repaint = false;
+                    let dx = (pt_cl.x - state.cursor_client.x).abs();
+                    let dy = (pt_cl.y - state.cursor_client.y).abs();
+                    if (dx >= 3 || dy >= 3) && pt_cl.x >= 0 && pt_cl.x < state.bg_w && pt_cl.y >= 0 && pt_cl.y < state.bg_h {
+                        state.cursor_client = pt_cl;
+                        need_canvas_repaint = true;
+                    }
+                    if cur_focus != state.focused_ctrl {
+                        state.focused_ctrl = cur_focus;
+                        need_canvas_repaint = true;
+                    }
+
                     if new_hover != state.hovered_ctrl {
                         let old = state.hovered_ctrl;
                         state.hovered_ctrl = new_hover;
+                        need_canvas_repaint = true;
                         if !old.is_null() {
                             InvalidateRect(old, null(), 0);
                         }
                         if !new_hover.is_null() {
                             InvalidateRect(new_hover, null(), 0);
                         }
+                    } else if need_canvas_repaint && !state.hovered_ctrl.is_null() {
+                        InvalidateRect(state.hovered_ctrl, null(), 0);
+                    }
+
+                    if need_canvas_repaint {
+                        InvalidateRect(hwnd, null(), 0);
                     }
                 }
                 return 0;
@@ -3991,7 +6076,91 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
         }
         WM_COMMAND => {
             let id = w_param & 0xFFFF;
-            let code = ((w_param >> 16) & 0xFFFF) as u16;
+            let _code = ((w_param >> 16) & 0xFFFF) as u16;
+
+            if id >= ID_NAV_HOME && id <= ID_NAV_ABOUT {
+                let target_tab = id - ID_NAV_HOME;
+                if let Some(state) = get_state_mut() {
+                    if state.active_tab != target_tab {
+                        state.active_tab = target_tab;
+                        update_tab_visibility(state);
+                    }
+                }
+                return 0;
+            }
+
+            if id == ID_BTN_GITHUB {
+                let _ = Command::new("explorer.exe").arg(GITHUB_REPO_URL).spawn();
+                return 0;
+            }
+
+            if id == ID_BTN_RESTORE_AUTORUN {
+                let mut restore_res: Option<(bool, String)> = None;
+                if let Some(state) = get_state_mut() {
+                    if !state.devices.is_empty() {
+                        let d = &mut state.devices[state.selected_idx];
+                        if d.has_security_lun && !d.is_unlocked {
+                            restore_res = Some((
+                                false,
+                                tr(
+                                    "보안 영역이 현재 잠겨 있습니다.\n\n먼저 [홈 / 잠금 제어]에서 비밀번호를 입력해 잠금을 해제하면 아이콘(logo.ico)과 autorun.inf가 자동으로 복구되며, 해제된 상태에서 이 버튼으로 언제든 수동 복구할 수 있습니다.",
+                                    "Security partition is currently locked.\n\nUnlock the security partition first; logo.ico and autorun.inf will be restored automatically or can be restored manually while unlocked.",
+                                    "セキュリティ領域は現在ロックされています。\n\n先にロックを解除するとアイコン(logo.ico)とautorun.infが自動復元されます。",
+                                )
+                                .to_string(),
+                            ));
+                        } else {
+                            let target = d
+                                .security_drive_letter
+                                .clone()
+                                .unwrap_or_else(|| d.drive_letter.clone());
+                            let ok = restore_security_autorun_and_icon(&target, true);
+                            if let Some(local_v) = load_vault(None, d) {
+                                let _ = save_vault(Some(&target), d, &local_v);
+                            }
+                            if ok {
+                                restore_res = Some((
+                                    true,
+                                    format!(
+                                        "✅ [{}] {}",
+                                        target,
+                                        tr(
+                                            "보안 드라이브에 autorun.inf 및 아이콘(logo.ico) 복구가 완료되었습니다!\n(숨김·시스템 보호 속성 적용 완료)",
+                                            "Successfully restored autorun.inf and drive icon (logo.ico)!",
+                                            "autorun.inf およびドライブアイコン (logo.ico) の復元が完了しました！"
+                                        )
+                                    ),
+                                ));
+                            } else {
+                                restore_res = Some((
+                                    false,
+                                    tr(
+                                        "드라이브에 파일을 기록할 수 없습니다. 쓰기 권한이나 마운트 상태를 확인해 주세요.",
+                                        "Could not write autorun.inf / logo.ico to the drive.",
+                                        "ドライブにファイルを書き込めませんでした。",
+                                    )
+                                    .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some((ok, msg)) = restore_res {
+                    let m = to_wide(&msg);
+                    let t = to_wide(if ok {
+                        tr("아이콘 · Autorun 복구 완료", "Autorun & Icon Restored", "アイコン・Autorun 復元完了")
+                    } else {
+                        tr("알림", "Notice", "確認")
+                    });
+                    MessageBoxW(
+                        hwnd,
+                        m.as_ptr(),
+                        t.as_ptr(),
+                        MB_OK | if ok { MB_ICONINFORMATION } else { MB_ICONWARNING },
+                    );
+                }
+                return 0;
+            }
 
             if id == ID_BTN_THEME {
                 if let Some(state) = get_state_mut() {
@@ -4265,36 +6434,54 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
             }
 
             if id == ID_BTN_CHANGE_PWD {
-                let mut dlg_params: Option<(f32, HFONT, HFONT, HICON, String)> = None;
-                if let Some(state) = get_state() {
+                let mut chg_res: Option<(bool, String)> = None;
+                if let Some(state) = get_state_mut() {
                     if !state.devices.is_empty() && state.devices[state.selected_idx].has_security_lun {
-                        let d = &state.devices[state.selected_idx];
-                        dlg_params = Some((state.dpi_scale, state.font_reg, state.font_bold, state.h_icon, d.effective_hint.clone()));
+                        let curr_p = get_ctrl_text(state.txt_curr_pwd);
+                        let new_p = get_ctrl_text(state.txt_new_pwd);
+                        let conf_p = get_ctrl_text(state.txt_conf_pwd);
+                        let new_h = get_ctrl_text(state.txt_new_hint);
+
+                        if curr_p.is_empty() {
+                            let m = to_wide(tr("현재 비밀번호를 입력해 주세요.", "Please enter current password.", "現在のパスワードを入力してください。"));
+                            let t = to_wide(tr("알림", "Notice", "確認"));
+                            MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
+                            return 0;
+                        }
+                        if new_p.len() < 4 || new_p.len() > 15 {
+                            let m = to_wide(tr("새 비밀번호는 4~15자로 입력해 주세요.", "New password must be 4-15 characters.", "新しいパスワードは4〜15文字で入力してください。"));
+                            let t = to_wide(tr("알림", "Notice", "確認"));
+                            MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
+                            return 0;
+                        }
+                        if new_p != conf_p {
+                            let m = to_wide(tr("새 비밀번호와 확인란이 일치하지 않습니다.", "New passwords do not match.", "新しいパスワードと確認欄が一致しません。"));
+                            let t = to_wide(tr("알림", "Notice", "確認"));
+                            MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
+                            return 0;
+                        }
+
+                        let idx = state.selected_idx;
+                        let (ok, msg) = change_password(&mut state.devices[idx], &curr_p, &new_p, &new_h);
+                        if ok {
+                            set_ctrl_text(state.txt_curr_pwd, "");
+                            set_ctrl_text(state.txt_new_pwd, "");
+                            set_ctrl_text(state.txt_conf_pwd, "");
+                        }
+                        chg_res = Some((ok, msg));
                     }
                 }
-                if let Some((scale, f_reg, f_bold, h_ico, cur_hint)) = dlg_params {
-                    let h_inst = GetModuleHandleW(null());
-                    if let Some((curr_p, new_p, new_h)) = show_change_password_dialog(hwnd, h_inst, scale, f_reg, f_bold, h_ico, &cur_hint) {
-                        let mut chg_res: Option<(bool, String)> = None;
-                        if let Some(state) = get_state_mut() {
-                            if !state.devices.is_empty() {
-                                let idx = state.selected_idx;
-                                chg_res = Some(change_password(&mut state.devices[idx], &curr_p, &new_p, &new_h));
-                            }
-                        }
-                        if let Some((ok, msg)) = chg_res {
-                            if let Some(state) = get_state_mut() {
-                                apply_language_and_refresh(state, true);
-                            }
-                            let m = to_wide(&msg);
-                            let t = to_wide(if ok {
-                                tr("변경 완료", "Success", "変更完了")
-                            } else {
-                                tr("변경 실패", "Failed", "変更失敗")
-                            });
-                            MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | if ok { MB_ICONINFORMATION } else { MB_ICONERROR });
-                        }
+                if let Some((ok, msg)) = chg_res {
+                    if let Some(state) = get_state_mut() {
+                        apply_language_and_refresh(state, true);
                     }
+                    let m = to_wide(&msg);
+                    let t = to_wide(if ok {
+                        tr("변경 완료", "Success", "変更完了")
+                    } else {
+                        tr("변경 실패", "Failed", "変更失敗")
+                    });
+                    MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | if ok { MB_ICONINFORMATION } else { MB_ICONERROR });
                 }
                 return 0;
             }
@@ -4386,19 +6573,21 @@ unsafe fn apply_dpi_scale(state: &mut AppUiState, new_dpi: i32, suggested_rc: Op
     let old_f3 = state.font_bold;
     let old_f4 = state.font_reg;
     let old_f5 = state.font_small_bold;
+    let old_f6 = state.font_small;
 
-    state.font_title = create_app_font(-sc(21, scale), 700);
+    state.font_title = create_app_font(-sc(20, scale), 700);
     state.font_card_hdr = create_app_font(-sc(15, scale), 700);
     state.font_bold = create_app_font(-sc(14, scale), 700);
     state.font_reg = create_app_font(-sc(14, scale), 400);
     state.font_small_bold = create_app_font(-sc(13, scale), 700);
+    state.font_small = create_app_font(-sc(13, scale), 400);
 
     let win_style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     let mut rc_win = RECT {
         left: 0,
         top: 0,
-        right: sc(700, scale),
-        bottom: sc(536, scale),
+        right: sc(860, scale),
+        bottom: sc(540, scale),
     };
     adjust_window_rect_dpi(&mut rc_win, win_style, 0, new_dpi);
     let win_w = rc_win.right - rc_win.left;
@@ -4428,12 +6617,20 @@ unsafe fn apply_dpi_scale(state: &mut AppUiState, new_dpi: i32, suggested_rc: Op
         );
     }
 
-    MoveWindow(state.btn_theme, sc(436, scale), sc(84, scale), sc(98, scale), sc(28, scale), 1);
-    MoveWindow(state.cmb_lang, sc(542, scale), sc(84, scale), sc(138, scale), sc(28, scale), 1);
-    MoveWindow(state.cmb_dev, sc(20, scale), sc(114, scale), sc(542, scale), sc(32, scale), 1);
-    MoveWindow(state.btn_refresh, sc(570, scale), sc(114, scale), sc(110, scale), sc(32, scale), 1);
+    // Sidebar Navigation Controls
+    MoveWindow(state.nav_home, sc(12, scale), sc(82, scale), sc(176, scale), sc(42, scale), 1);
+    MoveWindow(state.nav_pwd, sc(12, scale), sc(130, scale), sc(176, scale), sc(42, scale), 1);
+    MoveWindow(state.nav_shred, sc(12, scale), sc(178, scale), sc(176, scale), sc(42, scale), 1);
+    MoveWindow(state.nav_settings, sc(12, scale), sc(226, scale), sc(176, scale), sc(42, scale), 1);
+    MoveWindow(state.nav_about, sc(12, scale), sc(274, scale), sc(176, scale), sc(42, scale), 1);
+    MoveWindow(state.btn_to_tray, sc(12, scale), sc(480, scale), sc(176, scale), sc(40, scale), 1);
 
-    MoveWindow(state.txt_pwd, sc(146, scale), sc(384, scale), sc(186, scale), sc(20, scale), 1);
+    // Persistent Top Device Selector Bar
+    MoveWindow(state.cmb_dev, sc(220, scale), sc(94, scale), sc(502, scale), sc(32, scale), 1);
+    MoveWindow(state.btn_refresh, sc(730, scale), sc(94, scale), sc(110, scale), sc(32, scale), 1);
+
+    // Tab 0 (Home & Lock) Controls
+    MoveWindow(state.txt_pwd, sc(350, scale), sc(378, scale), sc(362, scale), sc(19, scale), 1);
     SendMessageW(state.txt_pwd, WM_SETFONT, state.font_reg as WPARAM, 1);
     SendMessageW(
         state.txt_pwd,
@@ -4441,28 +6638,64 @@ unsafe fn apply_dpi_scale(state: &mut AppUiState, new_dpi: i32, suggested_rc: Op
         3,
         (((sc(4, scale) as isize) << 16) | (sc(4, scale) as isize)) as LPARAM,
     );
-
-    MoveWindow(state.chk_show_pwd, sc(344, scale), sc(382, scale), sc(68, scale), sc(24, scale), 1);
+    MoveWindow(state.chk_show_pwd, sc(732, scale), sc(376, scale), sc(84, scale), sc(24, scale), 1);
     SendMessageW(state.chk_show_pwd, WM_SETFONT, state.font_reg as WPARAM, 1);
 
-    MoveWindow(state.cmb_idle_timer, sc(532, scale), sc(379, scale), sc(132, scale), sc(30, scale), 1);
+    MoveWindow(state.btn_unlock, sc(236, scale), sc(416, scale), sc(288, scale), sc(46, scale), 1);
+    MoveWindow(state.btn_lock, sc(536, scale), sc(416, scale), sc(288, scale), sc(46, scale), 1);
+    MoveWindow(state.btn_open_drv, sc(236, scale), sc(472, scale), sc(188, scale), sc(36, scale), 1);
+    MoveWindow(state.btn_safe_eject, sc(636, scale), sc(472, scale), sc(188, scale), sc(36, scale), 1);
+    if state.active_tab == 3 {
+        MoveWindow(state.btn_restore_autorun, sc(664, scale), sc(397, scale), sc(148, scale), sc(32, scale), 1);
+    } else {
+        MoveWindow(state.btn_restore_autorun, sc(436, scale), sc(472, scale), sc(188, scale), sc(36, scale), 1);
+    }
 
-    MoveWindow(state.btn_unlock, sc(36, scale), sc(420, scale), sc(200, scale), sc(42, scale), 1);
-    MoveWindow(state.btn_lock, sc(250, scale), sc(420, scale), sc(200, scale), sc(42, scale), 1);
-    MoveWindow(state.btn_change_pwd, sc(464, scale), sc(420, scale), sc(200, scale), sc(42, scale), 1);
+    // Tab 1 (Password & Security) Controls
+    let edits = [
+        (state.txt_curr_pwd, 256),
+        (state.txt_new_pwd, 302),
+        (state.txt_conf_pwd, 348),
+        (state.txt_new_hint, 394),
+    ];
+    for &(ed, y_ed) in &edits {
+        MoveWindow(ed, sc(448, scale), sc(y_ed, scale), sc(362, scale), sc(19, scale), 1);
+        SendMessageW(ed, WM_SETFONT, state.font_reg as WPARAM, 1);
+        SendMessageW(
+            ed,
+            EM_SETMARGINS,
+            3,
+            (((sc(4, scale) as isize) << 16) | (sc(4, scale) as isize)) as LPARAM,
+        );
+    }
+    MoveWindow(state.btn_change_pwd, sc(418, scale), sc(446, scale), sc(402, scale), sc(48, scale), 1);
 
-    MoveWindow(state.btn_open_drv, sc(36, scale), sc(474, scale), sc(151, scale), sc(32, scale), 1);
-    MoveWindow(state.btn_shred, sc(197, scale), sc(474, scale), sc(151, scale), sc(32, scale), 1);
-    MoveWindow(state.btn_safe_eject, sc(358, scale), sc(474, scale), sc(151, scale), sc(32, scale), 1);
-    MoveWindow(state.btn_to_tray, sc(519, scale), sc(474, scale), sc(145, scale), sc(32, scale), 1);
+    // Tab 2 (File Shredder) Controls
+    MoveWindow(state.btn_shred, sc(276, scale), sc(292, scale), sc(508, scale), sc(52, scale), 1);
+
+    // Tab 3 (Settings) Controls
+    MoveWindow(state.cmb_idle_timer, sc(664, scale), sc(199, scale), sc(148, scale), sc(32, scale), 1);
+    MoveWindow(state.btn_theme, sc(664, scale), sc(265, scale), sc(148, scale), sc(32, scale), 1);
+    MoveWindow(state.cmb_lang, sc(664, scale), sc(331, scale), sc(148, scale), sc(32, scale), 1);
+
+    // Tab 4 (About / Info) Controls
+    MoveWindow(state.btn_github, sc(702, scale), sc(281, scale), sc(114, scale), sc(31, scale), 1);
 
     if !old_f1.is_null() { DeleteObject(old_f1 as HGDIOBJ); }
     if !old_f2.is_null() { DeleteObject(old_f2 as HGDIOBJ); }
     if !old_f3.is_null() { DeleteObject(old_f3 as HGDIOBJ); }
     if !old_f4.is_null() { DeleteObject(old_f4 as HGDIOBJ); }
     if !old_f5.is_null() { DeleteObject(old_f5 as HGDIOBJ); }
+    if !old_f6.is_null() { DeleteObject(old_f6 as HGDIOBJ); }
 
     InvalidateRect(state.hwnd_main, null(), 1);
+    InvalidateRect(state.nav_home, null(), 1);
+    InvalidateRect(state.nav_pwd, null(), 1);
+    InvalidateRect(state.nav_shred, null(), 1);
+    InvalidateRect(state.nav_settings, null(), 1);
+    InvalidateRect(state.nav_about, null(), 1);
+    InvalidateRect(state.btn_github, null(), 1);
+    InvalidateRect(state.btn_restore_autorun, null(), 1);
     InvalidateRect(state.btn_theme, null(), 1);
     InvalidateRect(state.cmb_lang, null(), 1);
     InvalidateRect(state.cmb_dev, null(), 1);
@@ -4494,9 +6727,9 @@ fn run_gui() {
 
         let cls_name = to_wide("SecureUSBManagerRustClassV3");
         let br_card = CreateSolidBrush(rgb(255, 255, 255));
-        let br_card_dark = CreateSolidBrush(rgb(23, 33, 51));
-        let br_edit_dark = CreateSolidBrush(rgb(15, 23, 42));
-        let br_edit_light_dis = CreateSolidBrush(rgb(241, 245, 249));
+        let br_card_dark = CreateSolidBrush(rgb(45, 45, 45));
+        let br_edit_dark = CreateSolidBrush(rgb(30, 30, 30));
+        let br_edit_light_dis = CreateSolidBrush(rgb(243, 243, 243));
 
         let wc = WNDCLASSEXW {
             cb_size: std::mem::size_of::<WNDCLASSEXW>() as UINT,
@@ -4518,8 +6751,8 @@ fn run_gui() {
         let mut rc_win = RECT {
             left: 0,
             top: 0,
-            right: sc(700, scale),
-            bottom: sc(536, scale),
+            right: sc(860, scale),
+            bottom: sc(540, scale),
         };
         adjust_window_rect_dpi(&mut rc_win, win_style, 0, dpi_x);
         let win_w = rc_win.right - rc_win.left;
@@ -4545,68 +6778,125 @@ fn run_gui() {
         );
         apply_window_dark_titlebar(hwnd, init_dark);
 
-        let font_title = create_app_font(-sc(21, scale), 700);
+        let font_title = create_app_font(-sc(20, scale), 700);
         let font_card_hdr = create_app_font(-sc(15, scale), 700);
         let font_bold = create_app_font(-sc(14, scale), 700);
         let font_reg = create_app_font(-sc(14, scale), 400);
         let font_small_bold = create_app_font(-sc(13, scale), 700);
+        let font_small = create_app_font(-sc(13, scale), 400);
 
         let c_btn = to_wide("BUTTON");
         let c_edit = to_wide("EDIT");
         let empty = to_wide("");
 
-        let btn_theme = CreateWindowExW(
+        // Left Sidebar Navigation Items
+        let nav_home = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(436, scale),
-            sc(84, scale),
-            sc(98, scale),
-            sc(28, scale),
+            sc(12, scale),
+            sc(82, scale),
+            sc(176, scale),
+            sc(42, scale),
             hwnd,
-            ID_BTN_THEME as HMENU,
+            ID_NAV_HOME as HMENU,
             h_inst,
             null_mut(),
         );
-
-        let cmb_lang = CreateWindowExW(
+        let nav_pwd = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(542, scale),
-            sc(84, scale),
-            sc(138, scale),
-            sc(28, scale),
+            sc(12, scale),
+            sc(130, scale),
+            sc(176, scale),
+            sc(42, scale),
             hwnd,
-            ID_CMB_LANG as HMENU,
+            ID_NAV_PWD as HMENU,
+            h_inst,
+            null_mut(),
+        );
+        let nav_shred = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(12, scale),
+            sc(178, scale),
+            sc(176, scale),
+            sc(42, scale),
+            hwnd,
+            ID_NAV_SHRED as HMENU,
+            h_inst,
+            null_mut(),
+        );
+        let nav_settings = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(12, scale),
+            sc(226, scale),
+            sc(176, scale),
+            sc(42, scale),
+            hwnd,
+            ID_NAV_SETTINGS as HMENU,
+            h_inst,
+            null_mut(),
+        );
+        let nav_about = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(12, scale),
+            sc(274, scale),
+            sc(176, scale),
+            sc(42, scale),
+            hwnd,
+            ID_NAV_ABOUT as HMENU,
+            h_inst,
+            null_mut(),
+        );
+        let btn_to_tray = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(12, scale),
+            sc(480, scale),
+            sc(176, scale),
+            sc(40, scale),
+            hwnd,
+            ID_BTN_TO_TRAY as HMENU,
             h_inst,
             null_mut(),
         );
 
+        // Persistent Right-Pane Device Selector Bar
         let cmb_dev = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(20, scale),
-            sc(114, scale),
-            sc(542, scale),
+            sc(220, scale),
+            sc(94, scale),
+            sc(502, scale),
             sc(32, scale),
             hwnd,
             ID_CMB_DEV as HMENU,
             h_inst,
             null_mut(),
         );
-
         let btn_refresh = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(570, scale),
-            sc(114, scale),
+            sc(730, scale),
+            sc(94, scale),
             sc(110, scale),
             sc(32, scale),
             hwnd,
@@ -4615,15 +6905,16 @@ fn run_gui() {
             null_mut(),
         );
 
+        // Tab 0 (Home & Lock) Controls
         let txt_pwd = CreateWindowExW(
             0,
             c_edit.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL,
-            sc(146, scale),
-            sc(384, scale),
-            sc(186, scale),
-            sc(20, scale),
+            sc(350, scale),
+            sc(378, scale),
+            sc(362, scale),
+            sc(19, scale),
             hwnd,
             ID_TXT_PWD as HMENU,
             h_inst,
@@ -4637,9 +6928,9 @@ fn run_gui() {
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(344, scale),
-            sc(382, scale),
-            sc(68, scale),
+            sc(732, scale),
+            sc(376, scale),
+            sc(84, scale),
             sc(24, scale),
             hwnd,
             ID_CHK_SHOW_PWD as HMENU,
@@ -4648,30 +6939,15 @@ fn run_gui() {
         );
         SendMessageW(chk_show_pwd, WM_SETFONT, font_reg as WPARAM, 1);
 
-        let cmb_idle_timer = CreateWindowExW(
-            0,
-            c_btn.as_ptr(),
-            empty.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(532, scale),
-            sc(379, scale),
-            sc(132, scale),
-            sc(30, scale),
-            hwnd,
-            ID_CMB_IDLE_TIMER as HMENU,
-            h_inst,
-            null_mut(),
-        );
-
         let btn_unlock = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(36, scale),
-            sc(420, scale),
-            sc(200, scale),
-            sc(42, scale),
+            sc(236, scale),
+            sc(416, scale),
+            sc(288, scale),
+            sc(46, scale),
             hwnd,
             ID_BTN_UNLOCK as HMENU,
             h_inst,
@@ -4682,56 +6958,40 @@ fn run_gui() {
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(250, scale),
-            sc(420, scale),
-            sc(200, scale),
-            sc(42, scale),
+            sc(536, scale),
+            sc(416, scale),
+            sc(288, scale),
+            sc(46, scale),
             hwnd,
             ID_BTN_LOCK as HMENU,
             h_inst,
             null_mut(),
         );
-        let btn_change_pwd = CreateWindowExW(
-            0,
-            c_btn.as_ptr(),
-            empty.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(464, scale),
-            sc(420, scale),
-            sc(200, scale),
-            sc(42, scale),
-            hwnd,
-            ID_BTN_CHANGE_PWD as HMENU,
-            h_inst,
-            null_mut(),
-        );
-
-        // Bottom Utility Action Row (4 Uniform Buttons: 151px each, 10px gap)
         let btn_open_drv = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(236, scale),
+            sc(472, scale),
+            sc(188, scale),
             sc(36, scale),
-            sc(474, scale),
-            sc(151, scale),
-            sc(32, scale),
             hwnd,
             ID_BTN_OPEN_DRV as HMENU,
             h_inst,
             null_mut(),
         );
-        let btn_shred = CreateWindowExW(
+        let btn_restore_autorun = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(197, scale),
-            sc(474, scale),
-            sc(151, scale),
-            sc(32, scale),
+            sc(436, scale),
+            sc(472, scale),
+            sc(188, scale),
+            sc(36, scale),
             hwnd,
-            ID_BTN_SHRED as HMENU,
+            ID_BTN_RESTORE_AUTORUN as HMENU,
             h_inst,
             null_mut(),
         );
@@ -4740,26 +7000,132 @@ fn run_gui() {
             c_btn.as_ptr(),
             empty.as_ptr(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(358, scale),
-            sc(474, scale),
-            sc(151, scale),
-            sc(32, scale),
+            sc(636, scale),
+            sc(472, scale),
+            sc(188, scale),
+            sc(36, scale),
             hwnd,
             ID_BTN_SAFE_EJECT as HMENU,
             h_inst,
             null_mut(),
         );
-        let btn_to_tray = CreateWindowExW(
+
+        // Tab 1 (Password & Vault Security) Controls
+        let mk_tab1_edit = |id: usize, y_pos: i32, is_pwd: bool| -> HWND {
+            let mut st_ed = WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL;
+            if is_pwd {
+                st_ed |= ES_PASSWORD;
+            }
+            let hw = CreateWindowExW(
+                0,
+                c_edit.as_ptr(),
+                empty.as_ptr(),
+                st_ed,
+                sc(448, scale),
+                sc(y_pos, scale),
+                sc(362, scale),
+                sc(19, scale),
+                hwnd,
+                id as HMENU,
+                h_inst,
+                null_mut(),
+            );
+            SendMessageW(hw, WM_SETFONT, font_reg as WPARAM, 1);
+            SendMessageW(hw, EM_SETMARGINS, 3, (((sc(4, scale) as isize) << 16) | (sc(4, scale) as isize)) as LPARAM);
+            hw
+        };
+        let txt_curr_pwd = mk_tab1_edit(ID_TXT_CURR_PWD, 256, true);
+        let txt_new_pwd = mk_tab1_edit(ID_TXT_NEW_PWD, 302, true);
+        let txt_conf_pwd = mk_tab1_edit(ID_TXT_CONF_PWD, 348, true);
+        let txt_new_hint = mk_tab1_edit(ID_TXT_NEW_HINT, 394, false);
+
+        let btn_change_pwd = CreateWindowExW(
             0,
             c_btn.as_ptr(),
             empty.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(519, scale),
-            sc(474, scale),
-            sc(145, scale),
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            sc(418, scale),
+            sc(446, scale),
+            sc(402, scale),
+            sc(48, scale),
+            hwnd,
+            ID_BTN_CHANGE_PWD as HMENU,
+            h_inst,
+            null_mut(),
+        );
+
+        // Tab 2 (File Shredder) Controls
+        let btn_shred = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            sc(276, scale),
+            sc(292, scale),
+            sc(508, scale),
+            sc(52, scale),
+            hwnd,
+            ID_BTN_SHRED as HMENU,
+            h_inst,
+            null_mut(),
+        );
+
+        // Tab 3 (Settings) Controls
+        let cmb_idle_timer = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            sc(664, scale),
+            sc(199, scale),
+            sc(148, scale),
             sc(32, scale),
             hwnd,
-            ID_BTN_TO_TRAY as HMENU,
+            ID_CMB_IDLE_TIMER as HMENU,
+            h_inst,
+            null_mut(),
+        );
+        let btn_theme = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            sc(664, scale),
+            sc(265, scale),
+            sc(148, scale),
+            sc(32, scale),
+            hwnd,
+            ID_BTN_THEME as HMENU,
+            h_inst,
+            null_mut(),
+        );
+        let cmb_lang = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            sc(664, scale),
+            sc(331, scale),
+            sc(148, scale),
+            sc(32, scale),
+            hwnd,
+            ID_CMB_LANG as HMENU,
+            h_inst,
+            null_mut(),
+        );
+
+        // Tab 4 (About / Info) Controls
+        let btn_github = CreateWindowExW(
+            0,
+            c_btn.as_ptr(),
+            empty.as_ptr(),
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            sc(702, scale),
+            sc(281, scale),
+            sc(114, scale),
+            sc(31, scale),
+            hwnd,
+            ID_BTN_GITHUB as HMENU,
             h_inst,
             null_mut(),
         );
@@ -4767,16 +7133,25 @@ fn run_gui() {
         let st = AppUiState {
             hwnd_main: hwnd,
             dpi_scale: scale,
+            active_tab: 0,
             h_icon,
             font_title,
             font_card_hdr,
             font_bold,
             font_reg,
             font_small_bold,
+            font_small,
             br_card,
             br_card_dark,
             br_edit_dark,
             br_edit_light_dis,
+            nav_home,
+            nav_pwd,
+            nav_shred,
+            nav_settings,
+            nav_about,
+            btn_github,
+            btn_restore_autorun,
             btn_theme,
             cmb_lang,
             cmb_dev,
@@ -4785,6 +7160,10 @@ fn run_gui() {
             chk_show_pwd,
             btn_unlock,
             btn_lock,
+            txt_curr_pwd,
+            txt_new_pwd,
+            txt_conf_pwd,
+            txt_new_hint,
             btn_change_pwd,
             cmb_idle_timer,
             btn_open_drv,
@@ -4792,6 +7171,11 @@ fn run_gui() {
             btn_safe_eject,
             btn_to_tray,
             hovered_ctrl: null_mut(),
+            focused_ctrl: null_mut(),
+            cursor_client: POINT { x: 420, y: 200 },
+            bg_pixels: Vec::new(),
+            bg_w: 0,
+            bg_h: 0,
             devices: Vec::new(),
             selected_idx: 0,
             part_info_str: String::new(),
@@ -4827,6 +7211,13 @@ fn run_gui() {
                 if let Some(s) = get_state() {
                     if msg.hwnd == s.txt_pwd {
                         SendMessageW(hwnd, WM_COMMAND, ID_BTN_UNLOCK, 0);
+                        continue;
+                    } else if msg.hwnd == s.txt_curr_pwd
+                        || msg.hwnd == s.txt_new_pwd
+                        || msg.hwnd == s.txt_conf_pwd
+                        || msg.hwnd == s.txt_new_hint
+                    {
+                        SendMessageW(hwnd, WM_COMMAND, ID_BTN_CHANGE_PWD, 0);
                         continue;
                     }
                 }

@@ -1,12 +1,12 @@
 [package]
 name = "secure_usb_manager"
-version = "2.5.4"
+version = "2.5.5"
 edition = "2021"
 authors = ["Secure USB Suite"]
 description = "Native Win32 Hardware Security Partition & Vault Manager"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
