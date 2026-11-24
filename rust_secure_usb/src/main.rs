@@ -112,6 +112,7 @@ const GENERIC_READ: DWORD = 0x80000000;
 const GENERIC_WRITE: DWORD = 0x40000000;
 const FILE_SHARE_READ: DWORD = 0x00000001;
 const FILE_SHARE_WRITE: DWORD = 0x00000002;
+const FILE_SHARE_DELETE: DWORD = 0x00000004;
 const OPEN_EXISTING: DWORD = 3;
 const FILE_ATTRIBUTE_READONLY: DWORD = 0x00000001;
 const FILE_ATTRIBUTE_HIDDEN: DWORD = 0x00000002;
@@ -122,6 +123,22 @@ const IOCTL_SCSI_PASS_THROUGH_DIRECT: DWORD = 0x0004D014;
 const FSCTL_LOCK_VOLUME: DWORD = 0x00090018;
 const FSCTL_DISMOUNT_VOLUME: DWORD = 0x00090020;
 const IOCTL_STORAGE_EJECT_MEDIA: DWORD = 0x002D4808;
+const IOCTL_STORAGE_LOAD_MEDIA: DWORD = 0x002D480C;
+const IOCTL_STORAGE_LOAD_MEDIA2: DWORD = 0x002D080C;
+const IOCTL_STORAGE_GET_DEVICE_NUMBER: DWORD = 0x002D1080;
+const IOCTL_STORAGE_FIND_NEW_DEVICES: DWORD = 0x002D5018;
+const IOCTL_DISK_UPDATE_PROPERTIES: DWORD = 0x00070140;
+const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: DWORD = 0x00560000;
+const IOCTL_VOLUME_ONLINE: DWORD = 0x0056C008;
+const IOCTL_VOLUME_OFFLINE: DWORD = 0x0056C00C;
+const IOCTL_MOUNTMGR_CHECK_UNPROCESSED_VOLUMES: DWORD = 0x006D0030;
+
+const SHCNE_MEDIAINSERTED: i32 = 0x00000020;
+const SHCNE_MEDIAREMOVED: i32 = 0x00000040;
+const SHCNE_DRIVEREMOVED: i32 = 0x00000080;
+const SHCNE_DRIVEADD: i32 = 0x00000100;
+const SHCNF_PATHW: UINT = 0x0005;
+const SHCNF_FLUSHNOWAIT: UINT = 0x3000;
 
 const SCSI_IOCTL_DATA_OUT: u8 = 0;
 const SCSI_IOCTL_DATA_IN: u8 = 1;
@@ -437,6 +454,16 @@ extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
     fn SetFileAttributesW(lp_file_name: *const u16, dw_file_attributes: DWORD) -> BOOL;
     fn SetVolumeLabelW(lp_root_path_name: *const u16, lp_volume_name: *const u16) -> BOOL;
+    fn GetVolumeInformationW(
+        lp_root_path_name: *const u16,
+        lp_volume_name_buffer: *mut u16,
+        n_volume_name_size: DWORD,
+        lp_volume_serial_number: *mut DWORD,
+        lp_maximum_component_length: *mut DWORD,
+        lp_file_system_flags: *mut DWORD,
+        lp_file_system_name_buffer: *mut u16,
+        n_file_system_name_size: DWORD,
+    ) -> BOOL;
     fn GetDriveTypeW(lp_root_path_name: *const u16) -> UINT;
     fn GetLogicalDrives() -> DWORD;
     fn GetDiskFreeSpaceExW(
@@ -449,6 +476,20 @@ extern "system" {
     fn GetLocalTime(lp_system_time: *mut SYSTEMTIME);
     fn LoadLibraryW(lp_lib_file_name: *const u16) -> HINSTANCE;
     fn GetProcAddress(h_module: HINSTANCE, lp_proc_name: *const u8) -> *mut c_void;
+    fn FindFirstVolumeW(lpsz_volume_name: *mut u16, cch_buffer_length: DWORD) -> HANDLE;
+    fn FindNextVolumeW(h_find_volume: HANDLE, lpsz_volume_name: *mut u16, cch_buffer_length: DWORD) -> BOOL;
+    fn FindVolumeClose(h_find_volume: HANDLE) -> BOOL;
+    fn GetVolumePathNamesForVolumeNameW(
+        lpsz_volume_name: *const u16,
+        lpsz_volume_path_names: *mut u16,
+        cch_buffer_length: DWORD,
+        lpcch_return_length: *mut DWORD,
+    ) -> BOOL;
+    fn SetVolumeMountPointW(
+        lpsz_volume_mount_point: *const u16,
+        lpsz_volume_name: *const u16,
+    ) -> BOOL;
+    fn DeleteVolumeMountPointW(lpsz_volume_mount_point: *const u16) -> BOOL;
 }
 
 #[link(name = "user32")]
@@ -594,6 +635,7 @@ extern "system" {
 #[link(name = "shell32")]
 extern "system" {
     fn Shell_NotifyIconW(dw_message: DWORD, lp_data: *mut NOTIFYICONDATAW) -> BOOL;
+    fn SHChangeNotify(w_event_id: i32, u_flags: UINT, dw_item1: *const c_void, dw_item2: *const c_void);
 }
 
 #[link(name = "comdlg32")]
@@ -1052,7 +1094,23 @@ fn create_new_vault(new_password: &str, new_hint: &str, max_retries: i32, idle_m
     }
 }
 
+#[repr(align(64))]
+struct AlignedScsiBuf([u8; 4096]);
+
 fn execute_scsi(h_dev: HANDLE, cdb: &[u8], direction: u8, buffer: &mut [u8]) -> bool {
+    let mut aligned = AlignedScsiBuf([0u8; 4096]);
+    let use_aligned = !buffer.is_empty() && buffer.len() <= 4096;
+    if use_aligned && direction == SCSI_IOCTL_DATA_OUT {
+        aligned.0[..buffer.len()].copy_from_slice(buffer);
+    }
+    let data_ptr = if buffer.is_empty() {
+        null_mut()
+    } else if use_aligned {
+        aligned.0.as_mut_ptr() as *mut c_void
+    } else {
+        buffer.as_mut_ptr() as *mut c_void
+    };
+
     let mut swb = ScsiPassThroughDirectWithBuffer {
         sptd: ScsiPassThroughDirect {
             length: std::mem::size_of::<ScsiPassThroughDirect>() as u16,
@@ -1065,7 +1123,7 @@ fn execute_scsi(h_dev: HANDLE, cdb: &[u8], direction: u8, buffer: &mut [u8]) -> 
             data_in: direction,
             data_transfer_length: buffer.len() as u32,
             time_out_value: 10,
-            data_buffer: if buffer.is_empty() { null_mut() } else { buffer.as_mut_ptr() as *mut c_void },
+            data_buffer: data_ptr,
             sense_info_offset: std::mem::size_of::<ScsiPassThroughDirect>() as u32 + 4,
             cdb: [0u8; 16],
         },
@@ -1090,7 +1148,11 @@ fn execute_scsi(h_dev: HANDLE, cdb: &[u8], direction: u8, buffer: &mut [u8]) -> 
             null_mut(),
         )
     };
-    ok != 0 && swb.sptd.scsi_status == 0
+    let success = ok != 0 && swb.sptd.scsi_status == 0;
+    if success && use_aligned && direction == SCSI_IOCTL_DATA_IN {
+        buffer.copy_from_slice(&aligned.0[..buffer.len()]);
+    }
+    success
 }
 
 fn encrypt_password_tea(password: &str, dynamic_token: u8) -> [u8; 32] {
@@ -1123,11 +1185,12 @@ fn encrypt_password_tea(password: &str, dynamic_token: u8) -> [u8; 32] {
 
 fn open_drive_handle(drive_letter: &str) -> HANDLE {
     let path = to_wide(&format!("\\\\.\\{}", drive_letter));
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     unsafe {
         let mut h = CreateFileW(
             path.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            share,
             null_mut(),
             OPEN_EXISTING,
             0,
@@ -1137,7 +1200,18 @@ fn open_drive_handle(drive_letter: &str) -> HANDLE {
             h = CreateFileW(
                 path.as_ptr(),
                 GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                share,
+                null_mut(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            );
+        }
+        if h == INVALID_HANDLE_VALUE {
+            h = CreateFileW(
+                path.as_ptr(),
+                0,
+                share,
                 null_mut(),
                 OPEN_EXISTING,
                 0,
@@ -1172,29 +1246,57 @@ fn refresh_security_status(h_dev: HANDLE, dev: &mut DeviceInfo) -> bool {
     true
 }
 
+fn query_volume_label(drv: &str) -> String {
+    let root = to_wide(&format!("{}\\", drv));
+    let mut vol_name = [0u16; 64];
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(),
+            vol_name.as_mut_ptr(),
+            vol_name.len() as DWORD,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            0,
+        )
+    };
+    if ok != 0 {
+        let len = vol_name.iter().position(|&c| c == 0).unwrap_or(vol_name.len());
+        String::from_utf16_lossy(&vol_name[..len]).trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn drive_type_of(drv: &str) -> UINT {
+    let root = to_wide(&format!("{}\\", drv));
+    unsafe { GetDriveTypeW(root.as_ptr()) }
+}
+
 fn query_drive(drive_letter: &str) -> Option<DeviceInfo> {
     let h_dev = open_drive_handle(drive_letter);
     if h_dev == INVALID_HANDLE_VALUE {
         return None;
     }
 
+    // Standard 6-byte SCSI INQUIRY (CDB6) first, with fallback to 10-byte and 36-byte INQUIRY
+    // so strict UASP / USB 3.0 xHCI filter drivers never reject opcode 0x12 due to CDB length.
     let mut inq = [0u8; 0x60];
-    if !execute_scsi(h_dev, &[0x12, 0, 0, 0, 0x60, 0, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut inq) {
+    let inq_ok = execute_scsi(h_dev, &[0x12, 0, 0, 0, 0x60, 0], SCSI_IOCTL_DATA_IN, &mut inq)
+        || execute_scsi(h_dev, &[0x12, 0, 0, 0, 0x60, 0, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut inq)
+        || execute_scsi(h_dev, &[0x12, 0, 0, 0, 0x24, 0], SCSI_IOCTL_DATA_IN, &mut inq[..0x24]);
+    if !inq_ok {
         unsafe { CloseHandle(h_dev); }
         return None;
     }
 
-    if &inq[40..44] != b"BWSE" {
-        unsafe { CloseHandle(h_dev); }
-        return None;
-    }
-
-    let vendor = String::from_utf8_lossy(&inq[8..16]).trim().to_string();
-    let product = String::from_utf8_lossy(&inq[16..32]).trim().to_string();
+    let has_bwse = &inq[40..44] == b"BWSE";
 
     let mut flash_id = [0u8; 6];
     let mut fid_buf = [0u8; 512];
-    if execute_scsi(h_dev, &[0xE0, 0x10, 0x06, 0x90, 0x00, 0x0E, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut fid_buf) {
+    let fid_ok = execute_scsi(h_dev, &[0xE0, 0x10, 0x06, 0x90, 0x00, 0x0E, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut fid_buf);
+    if fid_ok {
         flash_id.copy_from_slice(&fid_buf[0..6]);
     }
 
@@ -1202,7 +1304,8 @@ fn query_drive(drive_letter: &str) -> Option<DeviceInfo> {
     let mut lun_flags = [0u8; 4];
     let mut has_security_lun = false;
     let mut part_buf = [0u8; 512];
-    if execute_scsi(h_dev, &[0xE0, 0x30, 0, 0, 0, 0, 0, 0, 1, 0], SCSI_IOCTL_DATA_IN, &mut part_buf) {
+    let part_ok = execute_scsi(h_dev, &[0xE0, 0x30, 0, 0, 0, 0, 0, 0, 1, 0], SCSI_IOCTL_DATA_IN, &mut part_buf);
+    if part_ok {
         for i in 0..4 {
             let off = 0x10 + i * 4;
             lun_sectors[i] = u32::from_be_bytes([part_buf[off], part_buf[off + 1], part_buf[off + 2], part_buf[off + 3]]);
@@ -1211,7 +1314,13 @@ fn query_drive(drive_letter: &str) -> Option<DeviceInfo> {
                 has_security_lun = true;
             }
         }
+        if lun_sectors[1] > 0 {
+            has_security_lun = true;
+        }
     }
+
+    let vendor = String::from_utf8_lossy(&inq[8..16]).trim().to_string();
+    let product = String::from_utf8_lossy(&inq[16..32]).trim().to_string();
 
     let mut dev = DeviceInfo {
         drive_letter: drive_letter.to_string(),
@@ -1240,12 +1349,23 @@ fn query_drive(drive_letter: &str) -> Option<DeviceInfo> {
         vault_dark_mode: None,
     };
 
-    refresh_security_status(h_dev, &mut dev);
-    if dev.retry_limit > 0 && dev.lun_sectors[1] > 0 {
+    let sec_ok = refresh_security_status(h_dev, &mut dev);
+    unsafe { CloseHandle(h_dev); }
+
+    // Accept the drive if it has the "BWSE" Innostor signature OR responds to Innostor vendor commands (0xE0 0x30 / 0xE0 0x32)
+    let valid_part = part_ok && (dev.lun_sectors[0] > 0 || dev.lun_sectors[1] > 0) && dev.lun_sectors[0] < 0x7FFF_FFFF;
+    let valid_sec = sec_ok && dev.retry_limit > 0 && dev.retry_limit <= 32;
+    if !has_bwse && !valid_part && !valid_sec {
+        return None;
+    }
+
+    if dev.lun_sectors[1] > 0
+        || (sec_ok && (dev.retry_limit > 0 || dev.retry_remain > 0))
+        || drive_type_of(drive_letter) == 5
+    {
         dev.has_security_lun = true;
     }
 
-    unsafe { CloseHandle(h_dev); }
     Some(dev)
 }
 
@@ -1302,14 +1422,334 @@ fn is_fixed_drive(drv: &str) -> bool {
     dt == 3
 }
 
-fn scan_devices() -> Vec<DeviceInfo> {
-    let mut raw_list = Vec::new();
+fn hide_locked_security_drive_letter(sec_drv: &str) {
+    if sec_drv.len() != 2 || !sec_drv.ends_with(':') || sec_drv.eq_ignore_ascii_case("C:") {
+        return;
+    }
+    let dt = drive_type_of(sec_drv);
+    if dt != 2 && dt != 3 {
+        return;
+    }
+    unsafe {
+        let h = open_drive_handle(sec_drv);
+        if h != INVALID_HANDLE_VALUE {
+            let mut dummy: DWORD = 0;
+            DeviceIoControl(h, FSCTL_DISMOUNT_VOLUME, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+            DeviceIoControl(h, IOCTL_VOLUME_OFFLINE, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+            CloseHandle(h);
+        }
+        let mount_pt = to_wide(&format!("{}\\", sec_drv));
+        if DeleteVolumeMountPointW(mount_pt.as_ptr()) != 0 {
+            SHChangeNotify(
+                SHCNE_MEDIAREMOVED,
+                SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                mount_pt.as_ptr() as *const c_void,
+                null(),
+            );
+            SHChangeNotify(
+                SHCNE_DRIVEREMOVED,
+                SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                mount_pt.as_ptr() as *const c_void,
+                null(),
+            );
+        }
+    }
+}
+
+fn hide_all_locked_innostor_removable_drives(public_drv: &str) {
     let mask = unsafe { GetLogicalDrives() };
-    // Pass 1: Removable (2) & CD-ROM (5) drives
     for i in 2..26 {
         if (mask & (1 << i)) != 0 {
             let drv = format!("{}:", (b'A' + i as u8) as char);
-            if !is_usb_candidate_drive(&drv) {
+            if drv.eq_ignore_ascii_case("C:") || drv.eq_ignore_ascii_case(public_drv) {
+                continue;
+            }
+            if drive_type_of(&drv) == 2 && !is_drive_ready(&drv) {
+                if query_drive(&drv).is_some() {
+                    hide_locked_security_drive_letter(&drv);
+                }
+            }
+        }
+    }
+}
+
+fn wake_and_rescan_security_lun(public_drv: &str) {
+    unsafe {
+        let mut dummy: DWORD = 0;
+        let mut innostor_disks: Vec<u32> = Vec::new();
+        // 1. Poke PhysicalDrive1..12 so Windows disk.sys / partmgr.sys immediately re-reads LUN1 partition table
+        for p in 1..=12u32 {
+            let pdrv = format!("PhysicalDrive{}", p);
+            let h = open_drive_handle(&pdrv);
+            if h != INVALID_HANDLE_VALUE {
+                let mut inq = [0u8; 0x60];
+                let inq_ok = execute_scsi(h, &[0x12, 0, 0, 0, 0x60, 0], SCSI_IOCTL_DATA_IN, &mut inq)
+                    || execute_scsi(h, &[0x12, 0, 0, 0, 0x60, 0, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut inq);
+                let mut sec_buf = [0u8; 0x30];
+                let sec_ok = execute_scsi(h, &[0xE0, 0x32, 0, 0, 0, 0, 0, 1, 6, 0], SCSI_IOCTL_DATA_IN, &mut sec_buf);
+                let is_innostor = (inq_ok && &inq[40..44] == b"BWSE") || sec_ok;
+                if is_innostor {
+                    innostor_disks.push(p);
+                    let mut tur_empty = [];
+                    let _ = execute_scsi(h, &[0x00, 0, 0, 0, 0, 0], SCSI_IOCTL_DATA_UNSPECIFIED, &mut tur_empty);
+                    let mut cap_buf = [0u8; 8];
+                    let _ = execute_scsi(h, &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut cap_buf);
+                }
+                DeviceIoControl(h, IOCTL_STORAGE_LOAD_MEDIA, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                DeviceIoControl(h, IOCTL_STORAGE_LOAD_MEDIA2, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                DeviceIoControl(h, IOCTL_STORAGE_FIND_NEW_DEVICES, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                CloseHandle(h);
+            }
+        }
+
+        // 2. Ask Windows MountPointManager to process any newly arrived volumes and assign drive letters
+        let mpm = to_wide("\\\\.\\MountPointManager");
+        let h_mpm = CreateFileW(
+            mpm.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        );
+        if h_mpm != INVALID_HANDLE_VALUE {
+            DeviceIoControl(
+                h_mpm,
+                IOCTL_MOUNTMGR_CHECK_UNPROCESSED_VOLUMES,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+                &mut dummy,
+                null_mut(),
+            );
+            CloseHandle(h_mpm);
+        }
+
+        // 3. Enumerate \\?\Volume{...}\ volumes: if an Innostor LUN1 volume has no drive letter
+        //    (e.g. unmounted while locked to hide the empty Removable Disk icon, or automount disabled),
+        //    bring it online and assign D:..Z:
+        let mut vol_buf = [0u16; 260];
+        let h_find = FindFirstVolumeW(vol_buf.as_mut_ptr(), vol_buf.len() as DWORD);
+        if h_find != INVALID_HANDLE_VALUE {
+            loop {
+                let vlen = vol_buf.iter().position(|&c| c == 0).unwrap_or(0);
+                if vlen > 1 {
+                    let vol_dt = GetDriveTypeW(vol_buf.as_ptr());
+                    // Only consider Removable (2) or Fixed (3) volumes, never CD-ROM (5)
+                    if vol_dt == 2 || vol_dt == 3 {
+                        let vol_str = String::from_utf16_lossy(&vol_buf[..vlen]);
+                        let dev_str = vol_str.trim_end_matches('\\');
+                        let dev_wide = to_wide(dev_str);
+                        let h_vol = CreateFileW(
+                            dev_wide.as_ptr(),
+                            0,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            null_mut(),
+                            OPEN_EXISTING,
+                            0,
+                            null_mut(),
+                        );
+                        if h_vol != INVALID_HANDLE_VALUE {
+                            let mut matches_innostor_lun1 = false;
+
+                            // Check A: IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
+                            let mut ext_buf = [0u8; 64];
+                            let mut bytes_ret: DWORD = 0;
+                            let ext_ok = DeviceIoControl(
+                                h_vol,
+                                IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                                null_mut(),
+                                0,
+                                ext_buf.as_mut_ptr() as *mut c_void,
+                                ext_buf.len() as DWORD,
+                                &mut bytes_ret,
+                                null_mut(),
+                            );
+                            if ext_ok != 0 && bytes_ret >= 12 {
+                                let num_extents = u32::from_le_bytes([ext_buf[0], ext_buf[1], ext_buf[2], ext_buf[3]]);
+                                let disk_num = u32::from_le_bytes([ext_buf[8], ext_buf[9], ext_buf[10], ext_buf[11]]);
+                                if num_extents >= 1 && innostor_disks.contains(&disk_num) {
+                                    matches_innostor_lun1 = true;
+                                }
+                            }
+
+                            // Check B: IOCTL_STORAGE_GET_DEVICE_NUMBER (works on DRIVE_REMOVABLE volumes)
+                            if !matches_innostor_lun1 {
+                                let mut sdn_buf = [0u8; 16];
+                                let mut sdn_ret: DWORD = 0;
+                                let sdn_ok = DeviceIoControl(
+                                    h_vol,
+                                    IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                                    null_mut(),
+                                    0,
+                                    sdn_buf.as_mut_ptr() as *mut c_void,
+                                    sdn_buf.len() as DWORD,
+                                    &mut sdn_ret,
+                                    null_mut(),
+                                );
+                                if sdn_ok != 0 && sdn_ret >= 12 {
+                                    let dev_type = u32::from_le_bytes([sdn_buf[0], sdn_buf[1], sdn_buf[2], sdn_buf[3]]);
+                                    let dev_num = u32::from_le_bytes([sdn_buf[4], sdn_buf[5], sdn_buf[6], sdn_buf[7]]);
+                                    // FILE_DEVICE_DISK == 7
+                                    if dev_type == 7 && innostor_disks.contains(&dev_num) {
+                                        matches_innostor_lun1 = true;
+                                    }
+                                }
+                            }
+
+                            // Check C: Direct SCSI INQUIRY / 0xE0 0x32 on removable volume handle
+                            if !matches_innostor_lun1 && vol_dt == 2 {
+                                let mut inq = [0u8; 0x60];
+                                let inq_ok = execute_scsi(h_vol, &[0x12, 0, 0, 0, 0x60, 0], SCSI_IOCTL_DATA_IN, &mut inq)
+                                    || execute_scsi(h_vol, &[0x12, 0, 0, 0, 0x60, 0, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut inq);
+                                if inq_ok && &inq[40..44] == b"BWSE" {
+                                    matches_innostor_lun1 = true;
+                                }
+                            }
+
+                            if matches_innostor_lun1 {
+                                DeviceIoControl(h_vol, IOCTL_STORAGE_LOAD_MEDIA, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                                DeviceIoControl(h_vol, IOCTL_DISK_UPDATE_PROPERTIES, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                                DeviceIoControl(h_vol, IOCTL_VOLUME_ONLINE, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                                let mut paths_buf = [0u16; 260];
+                                let mut ret_len: DWORD = 0;
+                                let has_mount = GetVolumePathNamesForVolumeNameW(
+                                    vol_buf.as_ptr(),
+                                    paths_buf.as_mut_ptr(),
+                                    paths_buf.len() as DWORD,
+                                    &mut ret_len,
+                                ) != 0
+                                    && paths_buf[0] != 0;
+                                if !has_mount {
+                                    let used_mask = GetLogicalDrives();
+                                    for d in 3..26 {
+                                        if (used_mask & (1 << d)) == 0 {
+                                            let mount_pt = to_wide(&format!("{}:\\", (b'A' + d as u8) as char));
+                                            if SetVolumeMountPointW(mount_pt.as_ptr(), vol_buf.as_ptr()) != 0 {
+                                                SHChangeNotify(
+                                                    SHCNE_DRIVEADD,
+                                                    SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                                                    mount_pt.as_ptr() as *const c_void,
+                                                    null(),
+                                                );
+                                                SHChangeNotify(
+                                                    SHCNE_MEDIAINSERTED,
+                                                    SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                                                    mount_pt.as_ptr() as *const c_void,
+                                                    null(),
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            CloseHandle(h_vol);
+                        }
+                    }
+                }
+                vol_buf = [0u16; 260];
+                if FindNextVolumeW(h_find, vol_buf.as_mut_ptr(), vol_buf.len() as DWORD) == 0 {
+                    break;
+                }
+            }
+            FindVolumeClose(h_find);
+        }
+
+        // 4. Bring any logical drive letters online and update their disk properties
+        let mask = GetLogicalDrives();
+        for i in 2..26 {
+            if (mask & (1 << i)) != 0 {
+                let drv = format!("{}:", (b'A' + i as u8) as char);
+                if drv.eq_ignore_ascii_case("C:") || drv.eq_ignore_ascii_case(public_drv) {
+                    continue;
+                }
+                let dt = drive_type_of(&drv);
+                if dt == 2 || dt == 3 {
+                    let h = open_drive_handle(&drv);
+                    if h != INVALID_HANDLE_VALUE {
+                        DeviceIoControl(h, IOCTL_STORAGE_LOAD_MEDIA, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                        DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                        DeviceIoControl(h, IOCTL_VOLUME_ONLINE, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+                        CloseHandle(h);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_matching_security_volume(drv: &str, public_drv: &str, expected_sec_sectors: u32) -> bool {
+    if drv.eq_ignore_ascii_case("C:") || drv.eq_ignore_ascii_case(public_drv) {
+        return false;
+    }
+    let dt = drive_type_of(drv);
+    if dt != 2 && dt != 3 {
+        return false;
+    }
+    let Some((_, _, total_bytes)) = query_drive_space(drv) else {
+        return false;
+    };
+    // 1. Direct Innostor SCSI inquiry match
+    if query_drive(drv).is_some() {
+        return true;
+    }
+    // 2. Existing vault file on the drive
+    if Path::new(&format!("{}\\", drv)).join(VAULT_FILENAME).exists() {
+        return true;
+    }
+    // 3. Matching volume label ("Secure USB", "SECURITY", "SECURE_VAULT")
+    let lbl = query_volume_label(drv);
+    if lbl.eq_ignore_ascii_case("Secure USB")
+        || lbl.eq_ignore_ascii_case("SECURITY")
+        || lbl.eq_ignore_ascii_case("SECURE_VAULT")
+    {
+        return true;
+    }
+    // 4. Matching LUN1 byte capacity (within 15% tolerance for filesystem overhead)
+    if expected_sec_sectors > 0 {
+        let exp_bytes = (expected_sec_sectors as u64) * 512;
+        let diff = if total_bytes > exp_bytes {
+            total_bytes - exp_bytes
+        } else {
+            exp_bytes - total_bytes
+        };
+        if diff <= exp_bytes / 7 && dt == 2 {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_mounted_security_drive(primary: &DeviceInfo) -> Option<String> {
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 2..26 {
+        if (mask & (1 << i)) != 0 {
+            let drv = format!("{}:", (b'A' + i as u8) as char);
+            if is_matching_security_volume(&drv, &primary.drive_letter, primary.lun_sectors[1]) {
+                return Some(drv);
+            }
+        }
+    }
+    None
+}
+
+fn scan_devices() -> Vec<DeviceInfo> {
+    let mut raw_list: Vec<DeviceInfo> = Vec::new();
+    let mask = unsafe { GetLogicalDrives() };
+
+    // Unified Pass: Scan Removable (2), CD-ROM (5), and Fixed (3, skipping C:) drives together
+    // so LUN1 (even when Windows classifies it as DRIVE_FIXED) is never skipped when LUN0 is DRIVE_CDROM!
+    for i in 2..26 {
+        if (mask & (1 << i)) != 0 {
+            let drv = format!("{}:", (b'A' + i as u8) as char);
+            if drv.eq_ignore_ascii_case("C:") {
+                continue;
+            }
+            if !is_usb_candidate_drive(&drv) && !is_fixed_drive(&drv) {
                 continue;
             }
             if let Some(info) = query_drive(&drv) {
@@ -1318,39 +1758,80 @@ fn scan_devices() -> Vec<DeviceInfo> {
         }
     }
 
-    // Pass 2: Fallback for PCs where the USB controller reports as DRIVE_FIXED (3) (skip C:)
-    if raw_list.is_empty() {
-        for i in 3..26 {
-            if (mask & (1 << i)) != 0 {
-                let drv = format!("{}:", (b'A' + i as u8) as char);
-                if !is_fixed_drive(&drv) {
-                    continue;
-                }
-                if let Some(info) = query_drive(&drv) {
-                    raw_list.push(info);
-                }
-            }
+    // Also query PhysicalDrive1..12:
+    // - If no logical drive letter matched at all, use PhysicalDriveN
+    // - If a logical drive (e.g. CD-ROM H:) blocked 0xE0 0x30 / 0xE0 0x32 so its lun_sectors are 0,
+    //   enrich it from the matching Innostor PhysicalDriveN!
+    let mut phys_devs: Vec<DeviceInfo> = Vec::new();
+    for p in 1..=12 {
+        let pdrv = format!("PhysicalDrive{}", p);
+        if let Some(pinfo) = query_drive(&pdrv) {
+            phys_devs.push(pinfo);
         }
     }
 
-    // Pass 3: Fallback to PhysicalDrive1..12 if no logical drive letters matched
     if raw_list.is_empty() {
-        for p in 1..=12 {
-            let pdrv = format!("PhysicalDrive{}", p);
-            if let Some(info) = query_drive(&pdrv) {
-                raw_list.push(info);
+        raw_list = phys_devs;
+    } else if !phys_devs.is_empty() {
+        let pd = &phys_devs[0];
+        for d in &mut raw_list {
+            if d.lun_sectors[0] == 0 && d.lun_sectors[1] == 0 {
+                d.lun_sectors = pd.lun_sectors;
+                d.lun_flags = pd.lun_flags;
+            }
+            if d.flash_id == [0u8; 6] && pd.flash_id != [0u8; 6] {
+                d.flash_id = pd.flash_id;
+            }
+            if pd.has_security_lun {
+                d.has_security_lun = true;
+            }
+            if pd.is_unlocked {
+                d.is_unlocked = true;
             }
         }
     }
 
     if raw_list.len() >= 2 {
+        // Distinguish LUN0 (CD-ROM / small launcher) from LUN1 (Security data volume) regardless of drive-letter order!
+        raw_list.sort_by_key(|d| {
+            let dt = drive_type_of(&d.drive_letter);
+            let is_cd = dt == 5;
+            let sz = query_drive_space(&d.drive_letter).map(|(_, _, t)| t).unwrap_or(0);
+            (!is_cd, sz)
+        });
         let sec_drv = raw_list[1].drive_letter.clone();
+        let sec_unlocked = raw_list[1].is_unlocked;
         let mut primary = raw_list.remove(0);
-        primary.security_drive_letter = Some(sec_drv);
+        let sec_ready = is_drive_ready(&sec_drv);
+        if (primary.is_unlocked || sec_unlocked) && sec_ready {
+            primary.security_drive_letter = Some(sec_drv);
+            primary.is_unlocked = true;
+        } else {
+            // Security LUN is locked (0-byte empty Removable Disk slot) -> hide/unmount its drive letter from Explorer!
+            hide_locked_security_drive_letter(&sec_drv);
+            primary.security_drive_letter = None;
+            primary.is_unlocked = false;
+        }
         update_effective_vault_metadata(&mut primary);
         vec![primary]
     } else {
         if let Some(first) = raw_list.first_mut() {
+            // If only 1 drive responded to query_drive, check if it is actually LUN1 or if LUN1 is mounted on another letter
+            if first.is_unlocked && first.security_drive_letter.is_none() {
+                if drive_type_of(&first.drive_letter) != 5 {
+                    let sz = query_drive_space(&first.drive_letter).map(|(_, _, t)| t).unwrap_or(0);
+                    if sz > 1_073_741_824 {
+                        first.security_drive_letter = Some(first.drive_letter.clone());
+                    }
+                }
+                if first.security_drive_letter.is_none() {
+                    first.security_drive_letter = find_mounted_security_drive(first);
+                }
+            } else if !first.is_unlocked {
+                // Ensure any empty locked removable LUN1 drive letter is unmounted so it doesn't clutter Explorer
+                hide_all_locked_innostor_removable_drives(&first.drive_letter);
+                first.security_drive_letter = None;
+            }
             update_effective_vault_metadata(first);
         }
         raw_list
@@ -1369,11 +1850,37 @@ fn raw_hardware_unlock(h_dev: HANDLE, dev: &mut DeviceInfo, hw_password: &str) -
     dev.is_unlocked || dev.status_code == 0
 }
 
-fn wait_for_security_drive_letter(public_drv: &str, known_sec_drv: Option<&str>, timeout_ms: u64) -> Option<String> {
+fn snapshot_ready_drives_mask() -> DWORD {
+    let mask = unsafe { GetLogicalDrives() };
+    let mut ready_mask: DWORD = 0;
+    for i in 2..26 {
+        if (mask & (1 << i)) != 0 {
+            let drv = format!("{}:", (b'A' + i as u8) as char);
+            if is_drive_ready(&drv) {
+                ready_mask |= 1 << i;
+            }
+        }
+    }
+    ready_mask
+}
+
+fn wait_for_security_drive_letter(
+    public_drv: &str,
+    known_sec_drv: Option<&str>,
+    expected_sec_sectors: u32,
+    pre_ready_mask: DWORD,
+    timeout_ms: u64,
+) -> Option<String> {
+    wake_and_rescan_security_lun(public_drv);
     let mut elapsed = 0u64;
+    let mut rescanned_midway = false;
     while elapsed < timeout_ms {
+        if elapsed >= 900 && !rescanned_midway {
+            wake_and_rescan_security_lun(public_drv);
+            rescanned_midway = true;
+        }
         if let Some(kd) = known_sec_drv {
-            if is_drive_ready(kd) {
+            if !kd.eq_ignore_ascii_case(public_drv) && is_drive_ready(kd) {
                 return Some(kd.to_string());
             }
         }
@@ -1381,10 +1888,19 @@ fn wait_for_security_drive_letter(public_drv: &str, known_sec_drv: Option<&str>,
         for i in 2..26 {
             if (mask & (1 << i)) != 0 {
                 let drv = format!("{}:", (b'A' + i as u8) as char);
-                if drv.eq_ignore_ascii_case(public_drv) || (!is_usb_candidate_drive(&drv) && !is_fixed_drive(&drv)) {
+                if drv.eq_ignore_ascii_case("C:") || drv.eq_ignore_ascii_case(public_drv) {
                     continue;
                 }
-                if is_drive_ready(&drv) && query_drive(&drv).is_some() {
+                let dt = drive_type_of(&drv);
+                if dt != 2 && dt != 3 {
+                    continue;
+                }
+                if !is_drive_ready(&drv) {
+                    continue;
+                }
+                // Newly mounted after unlock OR matches security volume signature/capacity
+                let newly_ready = (pre_ready_mask & (1 << i)) == 0;
+                if newly_ready || is_matching_security_volume(&drv, public_drv, expected_sec_sectors) {
                     return Some(drv);
                 }
             }
@@ -1393,6 +1909,25 @@ fn wait_for_security_drive_letter(public_drv: &str, known_sec_drv: Option<&str>,
         elapsed += 120;
     }
     None
+}
+
+fn find_innostor_physical_drive_handle() -> HANDLE {
+    for p in 1..=12 {
+        let pdrv = format!("PhysicalDrive{}", p);
+        let h = open_drive_handle(&pdrv);
+        if h != INVALID_HANDLE_VALUE {
+            let mut inq = [0u8; 0x60];
+            let inq_ok = execute_scsi(h, &[0x12, 0, 0, 0, 0x60, 0], SCSI_IOCTL_DATA_IN, &mut inq)
+                || execute_scsi(h, &[0x12, 0, 0, 0, 0x60, 0, 0, 0, 0, 0], SCSI_IOCTL_DATA_IN, &mut inq);
+            let mut sec_buf = [0u8; 0x30];
+            let sec_ok = execute_scsi(h, &[0xE0, 0x32, 0, 0, 0, 0, 0, 1, 6, 0], SCSI_IOCTL_DATA_IN, &mut sec_buf);
+            if (inq_ok && &inq[40..44] == b"BWSE") || sec_ok {
+                return h;
+            }
+            unsafe { CloseHandle(h); }
+        }
+    }
+    INVALID_HANDLE_VALUE
 }
 
 fn lock_device(dev: &mut DeviceInfo) -> (bool, String) {
@@ -1414,14 +1949,28 @@ fn lock_device(dev: &mut DeviceInfo) -> (bool, String) {
         h_dev = open_drive_handle(&dev.drive_letter);
     }
     if h_dev == INVALID_HANDLE_VALUE {
+        h_dev = find_innostor_physical_drive_handle();
+    }
+    if h_dev == INVALID_HANDLE_VALUE {
         return (false, tr("드라이브 핸들을 열 수 없습니다.", "Cannot open drive handle.", "ドライブを開けません。").to_string());
     }
 
     let cdb = [0xE0, 0x33, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00];
     let mut empty = [];
-    let ok_cmd = execute_scsi(h_dev, &cdb, SCSI_IOCTL_DATA_UNSPECIFIED, &mut empty);
+    let mut ok_cmd = execute_scsi(h_dev, &cdb, SCSI_IOCTL_DATA_UNSPECIFIED, &mut empty);
     refresh_security_status(h_dev, dev);
     unsafe { CloseHandle(h_dev); }
+
+    if !ok_cmd || dev.is_unlocked {
+        let h_phys = find_innostor_physical_drive_handle();
+        if h_phys != INVALID_HANDLE_VALUE {
+            if execute_scsi(h_phys, &cdb, SCSI_IOCTL_DATA_UNSPECIFIED, &mut empty) {
+                ok_cmd = true;
+            }
+            refresh_security_status(h_phys, dev);
+            unsafe { CloseHandle(h_phys); }
+        }
+    }
 
     if !ok_cmd {
         return (false, tr("잠금 실패 (열려 있는 파일을 닫고 다시 시도하세요)", "Lock failed (Close open files)", "ロック失敗 (開いているファイルを閉じてください)").to_string());
@@ -1429,6 +1978,13 @@ fn lock_device(dev: &mut DeviceInfo) -> (bool, String) {
 
     let locked = !dev.is_unlocked;
     if locked {
+        if let Some(ref sec_drv) = dev.security_drive_letter.clone() {
+            if !sec_drv.eq_ignore_ascii_case(&dev.drive_letter) {
+                hide_locked_security_drive_letter(sec_drv);
+            }
+        }
+        hide_all_locked_innostor_removable_drives(&dev.drive_letter);
+        dev.security_drive_letter = None;
         dev.sec_used_bytes = 0;
         dev.sec_free_bytes = 0;
         dev.sec_total_bytes = 0;
@@ -1528,36 +2084,65 @@ fn unlock_device(dev: &mut DeviceInfo, user_password: &str) -> (bool, String, Op
         }
     }
 
+    let pre_ready_mask = snapshot_ready_drives_mask();
+
     let target_drv = dev.security_drive_letter.as_deref().unwrap_or(&dev.drive_letter).to_string();
     let mut h_dev = open_drive_handle(&target_drv);
     if h_dev == INVALID_HANDLE_VALUE {
         h_dev = open_drive_handle(&dev.drive_letter);
     }
     if h_dev == INVALID_HANDLE_VALUE {
+        h_dev = find_innostor_physical_drive_handle();
+    }
+    if h_dev == INVALID_HANDLE_VALUE {
         return (false, tr("드라이브 핸들을 열 수 없습니다.", "Cannot open drive handle.", "ドライブを開けません。").to_string(), None);
     }
 
-    refresh_security_status(h_dev, dev);
+    if !refresh_security_status(h_dev, dev) {
+        let h_phys = find_innostor_physical_drive_handle();
+        if h_phys != INVALID_HANDLE_VALUE {
+            unsafe { CloseHandle(h_dev); }
+            h_dev = h_phys;
+            refresh_security_status(h_dev, dev);
+        }
+    }
     let mut hw_opened = dev.is_unlocked;
     let mut opened_by_key: Option<String> = None;
 
-    if !hw_opened {
-        let mut keys_to_try = vec![user_password.to_string()];
-        for &mk in &HARDWARE_MASTER_KEYS {
-            if !keys_to_try.iter().any(|k| k == mk) {
-                keys_to_try.push(mk.to_string());
-            }
+    let mut keys_to_try = vec![user_password.to_string()];
+    for &mk in &HARDWARE_MASTER_KEYS {
+        if !keys_to_try.iter().any(|k| k == mk) {
+            keys_to_try.push(mk.to_string());
         }
-        for k in keys_to_try {
+    }
+
+    if !hw_opened {
+        for k in &keys_to_try {
             refresh_security_status(h_dev, dev);
-            if raw_hardware_unlock(h_dev, dev, &k) {
+            if raw_hardware_unlock(h_dev, dev, k) {
                 hw_opened = true;
-                opened_by_key = Some(k);
+                opened_by_key = Some(k.clone());
                 break;
             }
         }
     }
     unsafe { CloseHandle(h_dev); }
+
+    // Fallback: If CD-ROM class driver blocked vendor unlock CDB (0xE0 0x33), retry directly on PhysicalDriveN (disk.sys)
+    if !hw_opened {
+        let h_phys = find_innostor_physical_drive_handle();
+        if h_phys != INVALID_HANDLE_VALUE {
+            for k in &keys_to_try {
+                refresh_security_status(h_phys, dev);
+                if raw_hardware_unlock(h_phys, dev, k) {
+                    hw_opened = true;
+                    opened_by_key = Some(k.clone());
+                    break;
+                }
+            }
+            unsafe { CloseHandle(h_phys); }
+        }
+    }
 
     if !hw_opened {
         if dev.retry_remain == 0 {
@@ -1571,7 +2156,13 @@ fn unlock_device(dev: &mut DeviceInfo, user_password: &str) -> (bool, String, Op
         );
     }
 
-    let sec_drv = wait_for_security_drive_letter(&dev.drive_letter, dev.security_drive_letter.as_deref(), 2200);
+    let sec_drv = wait_for_security_drive_letter(
+        &dev.drive_letter,
+        dev.security_drive_letter.as_deref(),
+        dev.lun_sectors[1],
+        pre_ready_mask,
+        4200,
+    );
     if sec_drv.is_some() {
         dev.security_drive_letter = sec_drv.clone();
     }
@@ -1623,6 +2214,14 @@ fn unlock_device(dev: &mut DeviceInfo, user_password: &str) -> (bool, String, Op
     if let Some(ref mut v) = vault {
         v.fail_count = 0;
         v.last_fail_time.clear();
+        // Sync current active UI preferences (Theme & Idle Timer) TO the unlocked USB vault
+        // so an outdated Theme=Dark inside the locked partition never reverts the user's Light mode on unlock!
+        if let Some(dm) = dev.vault_dark_mode {
+            v.dark_mode = Some(dm);
+        }
+        if let Some(im) = dev.vault_idle_mins {
+            v.idle_lock_mins = im;
+        }
         save_vault(dev.security_drive_letter.as_deref(), dev, v);
     }
 
@@ -1774,11 +2373,15 @@ fn shred_directory_tree(dir: &Path) {
 }
 
 fn execute_self_destruct_wipe(dev: &mut DeviceInfo) -> String {
+    let pre_ready_mask = snapshot_ready_drives_mask();
     // 1. Mount security partition silently using hardware master key if currently locked
     let target_drv = dev.security_drive_letter.as_deref().unwrap_or(&dev.drive_letter).to_string();
     let mut h_dev = open_drive_handle(&target_drv);
     if h_dev == INVALID_HANDLE_VALUE {
         h_dev = open_drive_handle(&dev.drive_letter);
+    }
+    if h_dev == INVALID_HANDLE_VALUE {
+        h_dev = find_innostor_physical_drive_handle();
     }
     let mut hw_opened = dev.is_unlocked;
     if h_dev != INVALID_HANDLE_VALUE {
@@ -1797,7 +2400,13 @@ fn execute_self_destruct_wipe(dev: &mut DeviceInfo) -> String {
     }
 
     if hw_opened {
-        if let Some(sec_drv) = wait_for_security_drive_letter(&dev.drive_letter, dev.security_drive_letter.as_deref(), 2800) {
+        if let Some(sec_drv) = wait_for_security_drive_letter(
+            &dev.drive_letter,
+            dev.security_drive_letter.as_deref(),
+            dev.lun_sectors[1],
+            pre_ready_mask,
+            4200,
+        ) {
             dev.security_drive_letter = Some(sec_drv.clone());
             let root_path = PathBuf::from(format!("{}\\", sec_drv));
 
@@ -3373,13 +3982,6 @@ fn apply_language_and_refresh(state: &mut AppUiState, rescan: bool) {
             state.idle_limit_minutes = usb_idle;
             set_ctrl_text(state.cmb_idle_timer, get_idle_button_label(state.idle_limit_minutes));
         }
-        if let Some(usb_dark) = state.devices[state.selected_idx].vault_dark_mode {
-            if state.dark_mode != usb_dark {
-                state.dark_mode = usb_dark;
-                set_ctrl_text(state.btn_theme, get_theme_button_label(state.dark_mode));
-                apply_window_dark_titlebar(state.hwnd_main, state.dark_mode);
-            }
-        }
         let title = state.devices[state.selected_idx].display_title();
         set_ctrl_text(state.cmb_dev, &title);
     }
@@ -4666,7 +5268,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
     );
     draw_text_rect(
         hdc,
-        "v2.5.6",
+        "v2.5.7",
         rc_ver,
         state.font_small_bold,
         if dark { rgb(125, 211, 252) } else { rgb(29, 78, 216) },
@@ -5128,7 +5730,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
         let info_rows: [(&str, String); 7] = [
             (
                 tr("프로그램 / 버전", "App / Version", "プログラム / 版"),
-                "IS918 Secure USB Manager  ·  v2.5.6 (x86_64 Static CRT / WinPE)".to_string(),
+                "IS918 Secure USB Manager  ·  v2.5.7 (x86_64 Static CRT / WinPE)".to_string(),
             ),
             (
                 tr("출처 / 제작자", "Source / Author", "出典 / 制作者"),
