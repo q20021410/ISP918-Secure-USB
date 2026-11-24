@@ -3858,13 +3858,13 @@ unsafe fn update_tab_visibility(state: &mut AppUiState) {
     if tab == 0 {
         set_ctrl_text(
             state.btn_restore_autorun,
-            tr("아이콘·Autorun 복구", "Restore Autorun", "アイコン復元"),
+            tr("아이콘·Autorun 복구", "Repair Autorun", "アイコン復元"),
         );
         MoveWindow(state.btn_restore_autorun, sc(436, s), sc(472, s), sc(188, s), sc(36, s), 1);
     } else if tab == 3 {
         set_ctrl_text(
             state.btn_restore_autorun,
-            tr("즉시 복구", "Restore Now", "今すぐ復元"),
+            tr("즉시 복구", "Repair", "今すぐ復元"),
         );
         MoveWindow(state.btn_restore_autorun, sc(664, s), sc(397, s), sc(148, s), sc(32, s), 1);
     }
@@ -3921,7 +3921,7 @@ fn apply_language_and_refresh(state: &mut AppUiState, rescan: bool) {
     set_ctrl_text(state.nav_settings, tr("환경 설정", "Settings", "環境設定"));
     set_ctrl_text(state.nav_about, tr("프로그램 정보", "About / Info", "プログラム情報"));
     set_ctrl_text(state.btn_github, tr("GitHub 열기", "Open GitHub", "GitHubを開く"));
-    set_ctrl_text(state.btn_restore_autorun, tr("아이콘·Autorun 복구", "Restore Autorun", "アイコン復元"));
+    set_ctrl_text(state.btn_restore_autorun, tr("아이콘·Autorun 복구", "Repair Autorun", "アイコン復元"));
 
     set_ctrl_text(state.btn_theme, get_theme_button_label(state.dark_mode));
     set_ctrl_text(state.cmb_lang, get_lang_button_label());
@@ -5671,7 +5671,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
                 386,
                 tr(
                     "보안 영역 아이콘 · Autorun 복구",
-                    "Restore Security Drive Icon & Autorun",
+                    "Repair Security Drive Icon & Autorun",
                     "セキュリティ領域のアイコン・Autorun復元",
                 ),
             ),
