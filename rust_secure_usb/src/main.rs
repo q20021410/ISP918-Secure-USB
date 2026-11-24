@@ -1973,7 +1973,15 @@ fn lock_device(dev: &mut DeviceInfo) -> (bool, String) {
     }
 
     if !ok_cmd {
-        return (false, tr("잠금 실패 (열려 있는 파일을 닫고 다시 시도하세요)", "Lock failed (Close open files)", "ロック失敗 (開いているファイルを閉じてください)").to_string());
+        return (
+            false,
+            tr(
+                "잠금 실패 (열려 있는 파일을 모두 닫고 다시 시도해 주세요.)",
+                "Lock failed (Please close any open files and try again).",
+                "ロック失敗 (開いているファイルを閉じてから再試行してください。)",
+            )
+            .to_string(),
+        );
     }
 
     let locked = !dev.is_unlocked;
@@ -2049,9 +2057,9 @@ fn format_password_fail_warning(remain: i32, limit: i32) -> String {
             "残り回数が0になると、セキュリティ領域の全データが復元不可能な状態で完全消去(フォーマット)されます！",
         ),
         tr(
-            "비밀번호(대소문자, 한/영 키, CapsLock)를 정확히 확인한 후 다시 입력해 주세요.",
-            "Please carefully check CapsLock and your password before trying again.",
-            "CapsLockや入力文字をよくご確認の上、再度入力してください。",
+            "비밀번호(대·소문자, 한/영 키, Caps Lock)를 정확히 확인한 후 다시 입력해 주세요.",
+            "Please carefully check Caps Lock and your password before trying again.",
+            "Caps Lockや入力文字をよくご確認の上、再度入力してください。",
         )
     )
 }
@@ -2510,7 +2518,7 @@ fn select_and_shred_file(hwnd: HWND, initial_drive: Option<&str>) -> Option<(boo
             )
         );
         let cm_w = to_wide(&confirm_msg);
-        let ct_w = to_wide(tr("파일 보안 완전 삭제 확인", "Confirm File Shredder", "ファイルの完全削除確認"));
+        let ct_w = to_wide(tr("파일 보안 완전 삭제 확인", "Confirm Permanent File Shredding", "ファイルの完全削除確認"));
         if MessageBoxW(hwnd, cm_w.as_ptr(), ct_w.as_ptr(), MB_YESNO | MB_ICONWARNING) != IDYES {
             return None;
         }
@@ -3734,7 +3742,7 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
 
     let t_show = to_wide(tr("보안 관리 창 열기", "Open Manager Window", "管理画面を開く"));
     let t_open = to_wide(tr("보안 드라이브 폴더 열기", "Open Security Drive Folder", "セキュリティフォルダを開く"));
-    let t_restore = to_wide(tr("보안 영역 아이콘 · Autorun 복구", "Restore Drive Icon & Autorun", "アイコン・Autorunの復元"));
+    let t_restore = to_wide(tr("보안 영역 아이콘·Autorun 복구", "Repair Drive Icon & Autorun", "アイコン・Autorunの修復"));
     let t_lock = to_wide(tr("즉시 보안 영역 잠금 (Lock)", "Lock Security Partition Now", "直ちにロックする (Lock)"));
     let t_eject = to_wide(tr("잠금 후 안전 제거 (Safe Eject)", "Lock & Safe Eject USB", "ロックして安全に取り外す"));
     let t_exit = to_wide(tr("프로그램 종료", "Exit Program", "プログラム終了"));
@@ -3807,10 +3815,10 @@ fn get_theme_button_label(dark: bool) -> &'static str {
 
 fn get_idle_button_label(mins: u32) -> &'static str {
     match mins {
-        5 => tr("5분", "5 Mins", "5分"),
-        10 => tr("10분", "10 Mins", "10分"),
-        15 => tr("15분", "15 Mins", "15分"),
-        30 => tr("30분", "30 Mins", "30分"),
+        5 => tr("5분", "5 Minutes", "5分"),
+        10 => tr("10분", "10 Minutes", "10分"),
+        15 => tr("15분", "15 Minutes", "15分"),
+        30 => tr("30분", "30 Minutes", "30分"),
         _ => tr("사용 안 함", "Disabled", "無効"),
     }
 }
@@ -3858,13 +3866,13 @@ unsafe fn update_tab_visibility(state: &mut AppUiState) {
     if tab == 0 {
         set_ctrl_text(
             state.btn_restore_autorun,
-            tr("아이콘·Autorun 복구", "Repair Autorun", "アイコン復元"),
+            tr("아이콘·Autorun 복구", "Repair Autorun", "アイコン修復"),
         );
         MoveWindow(state.btn_restore_autorun, sc(436, s), sc(472, s), sc(188, s), sc(36, s), 1);
     } else if tab == 3 {
         set_ctrl_text(
             state.btn_restore_autorun,
-            tr("즉시 복구", "Repair", "今すぐ復元"),
+            tr("즉시 복구", "Repair", "今すぐ修復"),
         );
         MoveWindow(state.btn_restore_autorun, sc(664, s), sc(397, s), sc(148, s), sc(32, s), 1);
     }
@@ -3917,11 +3925,11 @@ fn apply_language_and_refresh(state: &mut AppUiState, rescan: bool) {
     );
     set_ctrl_text(state.nav_home, tr("홈 / 잠금 제어", "Home & Lock", "ホーム / ロック"));
     set_ctrl_text(state.nav_pwd, tr("비밀번호 변경", "Password", "パスワード変更"));
-    set_ctrl_text(state.nav_shred, tr("파일 완전삭제", "File Shredder", "ファイル完全削除"));
+    set_ctrl_text(state.nav_shred, tr("파일 완전 삭제", "File Shredder", "ファイル完全削除"));
     set_ctrl_text(state.nav_settings, tr("환경 설정", "Settings", "環境設定"));
     set_ctrl_text(state.nav_about, tr("프로그램 정보", "About / Info", "プログラム情報"));
     set_ctrl_text(state.btn_github, tr("GitHub 열기", "Open GitHub", "GitHubを開く"));
-    set_ctrl_text(state.btn_restore_autorun, tr("아이콘·Autorun 복구", "Repair Autorun", "アイコン復元"));
+    set_ctrl_text(state.btn_restore_autorun, tr("아이콘·Autorun 복구", "Repair Autorun", "アイコン修復"));
 
     set_ctrl_text(state.btn_theme, get_theme_button_label(state.dark_mode));
     set_ctrl_text(state.cmb_lang, get_lang_button_label());
@@ -3937,12 +3945,12 @@ fn apply_language_and_refresh(state: &mut AppUiState, rescan: bool) {
     set_ctrl_text(
         state.btn_shred,
         tr(
-            "영구 삭제할 파일 선택 (3-Pass 완전삭제)",
+            "영구 삭제할 파일 선택 (3-Pass 완전 삭제)",
             "Select File to Permanently Shred (3-Pass)",
             "ファイルを選択して3-Pass完全削除",
         ),
     );
-    set_ctrl_text(state.btn_safe_eject, tr("잠금 후 안전제거", "Lock & Safe Eject", "ロックして安全に取り外す"));
+    set_ctrl_text(state.btn_safe_eject, tr("잠금 후 안전 제거", "Lock & Safe Eject", "ロックして安全に取り外す"));
     set_ctrl_text(state.btn_to_tray, tr("트레이로 숨기기", "Hide to Tray", "トレイに隠す"));
     set_ctrl_text(state.cmb_idle_timer, get_idle_button_label(state.idle_limit_minutes));
 
@@ -4042,7 +4050,7 @@ fn update_selected_device_ui(state: &mut AppUiState) {
             } else {
                 tr("런처 영역", "Launcher", "ランチャー")
             };
-            let ro = if is_ro { tr(", 읽기전용", ", RO", ", 読取専用") } else { "" };
+            let ro = if is_ro { tr(", 읽기 전용", ", Read-Only", ", 読取専用") } else { "" };
             parts.push(format!("{} ({}{})", sz, role, ro));
         }
     }
@@ -5590,7 +5598,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
 
         let labels = [
             (tr("현재 비밀번호:", "Current Password:", "現在のパスワード:"), 250),
-            (tr("새 비밀번호 (4~15자):", "New Password (4-15):", "新しいパスワード (4~15):"), 296),
+            (tr("새 비밀번호 (4~15자):", "New Password (4-15 chars):", "新しいパスワード (4〜15文字):"), 296),
             (tr("새 비밀번호 확인:", "Confirm New Password:", "新しいパスワード (確認):"), 342),
             (tr("새 비밀번호 힌트:", "New Password Hint:", "新しいパスワードヒント:"), 388),
         ];
@@ -5619,7 +5627,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
         draw_text_rect(
             hdc,
             tr(
-                "파일 완전삭제 (DoD 3-Pass Shredder)",
+                "파일 완전 삭제 (DoD 3-Pass Shredder)",
                 "3-Pass DoD File Shredder",
                 "ファイル完全削除 (DoD 3-Pass Shredder)",
             ),
@@ -5671,14 +5679,14 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
 
         let rows = [
             (188, tr("자리 비움 자동 잠금 타이머", "Inactivity Auto-Lock Timer", "放置時の自動ロックタイマー")),
-            (254, tr("인터페이스 화면 테마", "Appearance Theme Mode", "インターフェース外観テーマ")),
+            (254, tr("인터페이스 화면 테마", "Appearance Theme", "インターフェース外観テーマ")),
             (320, tr("표시 언어 (Display Language)", "Display Language", "表示言語 (Display Language)")),
             (
                 386,
                 tr(
-                    "보안 영역 아이콘 · Autorun 복구",
+                    "보안 영역 아이콘·Autorun 복구",
                     "Repair Security Drive Icon & Autorun",
-                    "セキュリティ領域のアイコン・Autorun復元",
+                    "セキュリティ領域のアイコン・Autorun修復",
                 ),
             ),
         ];
@@ -5766,7 +5774,7 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
             (
                 tr("방어 정책 / 환경", "Defense / OS", "防御機能 / 環境"),
                 tr(
-                    "10회 오류 시 자동 파기 · DoD 3-Pass 완전삭제 · Win10 / 11 / WinPE",
+                    "10회 오류 시 자동 파기 · DoD 3-Pass 완전 삭제 · Win10 / 11 / WinPE",
                     "10-Try Self-Destruct · DoD 3-Pass Shredder · Win10 / 11 / WinPE",
                     "10回失敗で自動破棄 · DoD 3-Pass完全削除 · Win10 / 11 / WinPE",
                 )
@@ -6715,8 +6723,8 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                                 false,
                                 tr(
                                     "보안 영역이 현재 잠겨 있습니다.\n\n먼저 [홈 / 잠금 제어]에서 비밀번호를 입력해 잠금을 해제하면 아이콘(logo.ico)과 autorun.inf가 자동으로 복구되며, 해제된 상태에서 이 버튼으로 언제든 수동 복구할 수 있습니다.",
-                                    "Security partition is currently locked.\n\nUnlock the security partition first; logo.ico and autorun.inf will be restored automatically or can be restored manually while unlocked.",
-                                    "セキュリティ領域は現在ロックされています。\n\n先にロックを解除するとアイコン(logo.ico)とautorun.infが自動復元されます。",
+                                    "Security partition is currently locked.\n\nPlease unlock the security partition first; logo.ico and autorun.inf will be repaired automatically, or can be repaired manually while unlocked.",
+                                    "セキュリティ領域は現在ロックされています。\n\n先にロックを解除するとアイコン(logo.ico)とautorun.infが自動修復されます。",
                                 )
                                 .to_string(),
                             ));
@@ -6737,8 +6745,8 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                                         target,
                                         tr(
                                             "보안 드라이브에 autorun.inf 및 아이콘(logo.ico) 복구가 완료되었습니다!\n(읽기 전용·숨김 속성 및 'Secure USB' 라벨 적용 완료)",
-                                            "Successfully restored autorun.inf and drive icon (logo.ico) with Read-Only & Hidden attributes!",
-                                            "autorun.inf およびドライブアイコン (logo.ico) の復元が完了しました！(読み取り専用・隠しファイル属性適用)"
+                                            "Successfully repaired autorun.inf and drive icon (logo.ico) with Read-Only & Hidden attributes!",
+                                            "autorun.inf およびドライブアイコン (logo.ico) の修復が完了しました！(読み取り専用・隠しファイル属性適用)"
                                         )
                                     ),
                                 ));
@@ -6747,8 +6755,8 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                                     false,
                                     tr(
                                         "드라이브에 파일을 기록할 수 없습니다. 쓰기 권한이나 마운트 상태를 확인해 주세요.",
-                                        "Could not write autorun.inf / logo.ico to the drive.",
-                                        "ドライブにファイルを書き込めませんでした。",
+                                        "Could not write autorun.inf or logo.ico to the drive. Please check write permissions.",
+                                        "ドライブにファイルを書き込めませんでした。書き込み権限を確認してください。",
                                     )
                                     .to_string(),
                                 ));
@@ -6759,7 +6767,7 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                 if let Some((ok, msg)) = restore_res {
                     let m = to_wide(&msg);
                     let t = to_wide(if ok {
-                        tr("아이콘 · Autorun 복구 완료", "Autorun & Icon Restored", "アイコン・Autorun 復元完了")
+                        tr("아이콘·Autorun 복구 완료", "Autorun & Icon Repaired", "アイコン・Autorun 修復完了")
                     } else {
                         tr("알림", "Notice", "確認")
                     });
@@ -6849,10 +6857,10 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                 }
                 let items = vec![
                     tr("사용 안 함", "Disabled", "無効").to_string(),
-                    tr("5분", "5 Mins", "5分").to_string(),
-                    tr("10분", "10 Mins", "10分").to_string(),
-                    tr("15분", "15 Mins", "15分").to_string(),
-                    tr("30분", "30 Mins", "30分").to_string(),
+                    tr("5분", "5 Minutes", "5分").to_string(),
+                    tr("10분", "10 Minutes", "10分").to_string(),
+                    tr("15분", "15 Minutes", "15分").to_string(),
+                    tr("30분", "30 Minutes", "30分").to_string(),
                 ];
                 if let Some(sel) = show_dropdown_popup(hwnd, btn_hw, &items, cur_idx) {
                     if let Some(state) = get_state_mut() {
@@ -6932,7 +6940,7 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                 if let Some((ok, msg)) = select_and_shred_file(hwnd, sec_drv.as_deref()) {
                     let m = to_wide(&msg);
                     let t = to_wide(if ok {
-                        tr("파일 완전 삭제 완료", "Shred Completed", "完全削除完了")
+                        tr("파일 완전 삭제 완료", "File Shredding Complete", "完全削除完了")
                     } else {
                         tr("오류", "Error", "エラー")
                     });
@@ -6994,7 +7002,7 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                     }
                     let full_msg = if let Some((cnt, tm)) = intrusion {
                         format!(
-                            "{}\n\n⚠️ [{}] {}\n({}: {}회 / {}: {})",
+                            "{}\n\n⚠️ [{}] {}\n({}: {} / {}: {})",
                             msg,
                             tr("보안 경고", "Security Alert", "セキュリティ警告"),
                             tr(
@@ -7002,9 +7010,9 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                                 "Previous failed password attempts were detected on this USB!",
                                 "以前に誤ったパスワード試行が検知されました！",
                             ),
-                            tr("실패 횟수", "Failed count", "失敗回数"),
+                            tr("실패 횟수", "Failed Attempts", "失敗回数"),
                             cnt,
-                            tr("마지막 시도 시각", "Last attempt", "最終試行時刻"),
+                            tr("마지막 시도 시각", "Last Attempt Time", "最終試行時刻"),
                             if tm.is_empty() { "-" } else { &tm }
                         )
                     } else {
@@ -7054,13 +7062,13 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                         let new_h = get_ctrl_text(state.txt_new_hint);
 
                         if curr_p.is_empty() {
-                            let m = to_wide(tr("현재 비밀번호를 입력해 주세요.", "Please enter current password.", "現在のパスワードを入力してください。"));
+                            let m = to_wide(tr("현재 비밀번호를 입력해 주세요.", "Please enter your current password.", "現在のパスワードを入力してください。"));
                             let t = to_wide(tr("알림", "Notice", "確認"));
                             MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
                             return 0;
                         }
                         if new_p.len() < 4 || new_p.len() > 15 {
-                            let m = to_wide(tr("새 비밀번호는 4~15자로 입력해 주세요.", "New password must be 4-15 characters.", "新しいパスワードは4〜15文字で入力してください。"));
+                            let m = to_wide(tr("새 비밀번호는 4~15자로 입력해 주세요.", "New password must be 4 to 15 characters long.", "新しいパスワードは4〜15文字で入力してください。"));
                             let t = to_wide(tr("알림", "Notice", "確認"));
                             MessageBoxW(hwnd, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING);
                             return 0;
