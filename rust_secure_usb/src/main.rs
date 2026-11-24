@@ -4142,6 +4142,8 @@ fn update_selected_device_ui(state: &mut AppUiState) {
                 EnableWindow(state.txt_pwd, 0);
                 EnableWindow(state.btn_unlock, 0);
                 EnableWindow(state.btn_lock, 1);
+                EnableWindow(state.btn_open_drv, 1);
+                EnableWindow(state.btn_restore_autorun, 1);
                 EnableWindow(state.btn_shred, 1);
             }
         } else {
@@ -4155,6 +4157,8 @@ fn update_selected_device_ui(state: &mut AppUiState) {
                 EnableWindow(state.txt_pwd, 1);
                 EnableWindow(state.btn_unlock, 1);
                 EnableWindow(state.btn_lock, 0);
+                EnableWindow(state.btn_open_drv, 0);
+                EnableWindow(state.btn_restore_autorun, 0);
                 EnableWindow(state.btn_shred, 0);
                 if state.active_tab == 0 {
                     SetFocus(state.txt_pwd);
@@ -4168,6 +4172,8 @@ fn update_selected_device_ui(state: &mut AppUiState) {
         InvalidateRect(state.btn_unlock, null(), 0);
         InvalidateRect(state.btn_lock, null(), 0);
         InvalidateRect(state.btn_change_pwd, null(), 0);
+        InvalidateRect(state.btn_open_drv, null(), 0);
+        InvalidateRect(state.btn_restore_autorun, null(), 0);
         InvalidateRect(state.btn_refresh, null(), 0);
         InvalidateRect(state.btn_open_drv, null(), 0);
         InvalidateRect(state.btn_shred, null(), 0);
