@@ -5628,11 +5628,11 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
             hdc,
             tr(
                 "⚠️ 3-Pass 덮어쓰기 (0x00 → 0xFF → 난수)  ·  삭제된 파일은 복구할 수 없습니다.",
-                "⚠️ 3-Pass Overwrite (0x00 -> 0xFF -> Random)  ·  Shredded files cannot be recovered.",
+                "⚠️ 3-Pass Overwrite (0x00 → 0xFF → Random)  ·  Deleted files cannot be recovered.",
                 "⚠️ 3-Pass 上書き (0x00 → 0xFF → 乱数)  ·  削除されたファイルは復元できません。",
             ),
-            RECT { left: sc(252, s), top: sc(196, s), right: rc_card_right - sc(22, s), bottom: sc(226, s) },
-            state.font_bold,
+            RECT { left: sc(248, s), top: sc(196, s), right: rc_card_right - sc(18, s), bottom: sc(226, s) },
+            state.font_small_bold,
             w_col,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
