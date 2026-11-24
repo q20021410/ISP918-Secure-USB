@@ -211,6 +211,7 @@ const DT_RIGHT: UINT = 0x0002;
 const DT_VCENTER: UINT = 0x0004;
 const DT_SINGLELINE: UINT = 0x0020;
 const DT_END_ELLIPSIS: UINT = 0x8000;
+const VK_CAPITAL: i32 = 0x14;
 
 const MB_OK: UINT = 0x00000000;
 const MB_YESNO: UINT = 0x00000004;
@@ -234,6 +235,7 @@ const NIIF_INFO: DWORD = 0x00000001;
 const NIIF_WARNING: DWORD = 0x00000002;
 
 const MF_STRING: UINT = 0x00000000;
+const MF_GRAYED: UINT = 0x00000003;
 const MF_CHECKED: UINT = 0x00000008;
 const MF_SEPARATOR: UINT = 0x00000800;
 const TPM_RIGHTBUTTON: UINT = 0x0002;
@@ -490,10 +492,13 @@ extern "system" {
         lpsz_volume_name: *const u16,
     ) -> BOOL;
     fn DeleteVolumeMountPointW(lpsz_volume_mount_point: *const u16) -> BOOL;
+    fn FlushFileBuffers(h_file: HANDLE) -> BOOL;
 }
 
 #[link(name = "user32")]
 extern "system" {
+    fn FindWindowW(lp_class_name: *const u16, lp_window_name: *const u16) -> HWND;
+    fn GetKeyState(n_virt_key: i32) -> i16;
     fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) -> ATOM;
     fn CreateWindowExW(
         dw_ex_style: DWORD,
@@ -1930,17 +1935,28 @@ fn find_innostor_physical_drive_handle() -> HANDLE {
     INVALID_HANDLE_VALUE
 }
 
+fn dismount_security_volume_for_lock(sec_drv: &str) {
+    let h_sec = open_drive_handle(sec_drv);
+    if h_sec != INVALID_HANDLE_VALUE {
+        let mut dummy: DWORD = 0;
+        unsafe {
+            FlushFileBuffers(h_sec);
+            for _ in 0..3 {
+                if DeviceIoControl(h_sec, FSCTL_LOCK_VOLUME, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut()) != 0 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            DeviceIoControl(h_sec, FSCTL_DISMOUNT_VOLUME, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+            DeviceIoControl(h_sec, IOCTL_VOLUME_OFFLINE, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
+            CloseHandle(h_sec);
+        }
+    }
+}
+
 fn lock_device(dev: &mut DeviceInfo) -> (bool, String) {
     if let Some(ref sec_drv) = dev.security_drive_letter {
-        let h_sec = open_drive_handle(sec_drv);
-        if h_sec != INVALID_HANDLE_VALUE {
-            let mut dummy: DWORD = 0;
-            unsafe {
-                DeviceIoControl(h_sec, FSCTL_LOCK_VOLUME, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
-                DeviceIoControl(h_sec, FSCTL_DISMOUNT_VOLUME, null_mut(), 0, null_mut(), 0, &mut dummy, null_mut());
-                CloseHandle(h_sec);
-            }
-        }
+        dismount_security_volume_for_lock(sec_drv);
     }
 
     let target_drv = dev.security_drive_letter.as_deref().unwrap_or(&dev.drive_letter);
@@ -1962,6 +1978,9 @@ fn lock_device(dev: &mut DeviceInfo) -> (bool, String) {
     unsafe { CloseHandle(h_dev); }
 
     if !ok_cmd || dev.is_unlocked {
+        if let Some(ref sec_drv) = dev.security_drive_letter {
+            dismount_security_volume_for_lock(sec_drv);
+        }
         let h_phys = find_innostor_physical_drive_handle();
         if h_phys != INVALID_HANDLE_VALUE {
             if execute_scsi(h_phys, &cdb, SCSI_IOCTL_DATA_UNSPECIFIED, &mut empty) {
@@ -2645,6 +2664,7 @@ struct AppUiState {
     idle_limit_minutes: u32,
     dark_mode: bool,
     show_pwd: bool,
+    caps_lock_on: bool,
     tray_active: bool,
     bg_pixels: Vec<u32>,
     bg_w: i32,
@@ -3740,6 +3760,15 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
         return;
     }
 
+    let (has_dev, is_unlocked, can_lock) = if let Some(s) = get_state() {
+        let hd = !s.devices.is_empty();
+        let unl = hd && (!s.devices[s.selected_idx].has_security_lun || s.devices[s.selected_idx].is_unlocked);
+        let clk = hd && s.devices[s.selected_idx].has_security_lun && s.devices[s.selected_idx].is_unlocked;
+        (hd, unl, clk)
+    } else {
+        (false, false, false)
+    };
+
     let t_show = to_wide(tr("보안 관리 창 열기", "Open Manager Window", "管理画面を開く"));
     let t_open = to_wide(tr("보안 드라이브 폴더 열기", "Open Security Drive Folder", "セキュリティフォルダを開く"));
     let t_restore = to_wide(tr("보안 영역 아이콘·Autorun 복구", "Repair Drive Icon & Autorun", "アイコン・Autorunの修復"));
@@ -3747,12 +3776,16 @@ unsafe fn show_tray_context_menu(hwnd: HWND) {
     let t_eject = to_wide(tr("잠금 후 안전 제거 (Safe Eject)", "Lock & Safe Eject USB", "ロックして安全に取り外す"));
     let t_exit = to_wide(tr("프로그램 종료", "Exit Program", "プログラム終了"));
 
+    let fl_open = MF_STRING | if is_unlocked { 0 } else { MF_GRAYED };
+    let fl_lock = MF_STRING | if can_lock { 0 } else { MF_GRAYED };
+    let fl_eject = MF_STRING | if has_dev { 0 } else { MF_GRAYED };
+
     AppendMenuW(h_menu, MF_STRING, ID_TRAY_SHOW, t_show.as_ptr());
-    AppendMenuW(h_menu, MF_STRING, ID_TRAY_OPEN_FOLDER, t_open.as_ptr());
-    AppendMenuW(h_menu, MF_STRING, ID_TRAY_RESTORE_AUTORUN, t_restore.as_ptr());
+    AppendMenuW(h_menu, fl_open, ID_TRAY_OPEN_FOLDER, t_open.as_ptr());
+    AppendMenuW(h_menu, fl_open, ID_TRAY_RESTORE_AUTORUN, t_restore.as_ptr());
     AppendMenuW(h_menu, MF_SEPARATOR, 0, null());
-    AppendMenuW(h_menu, MF_STRING, ID_TRAY_LOCK_NOW, t_lock.as_ptr());
-    AppendMenuW(h_menu, MF_STRING, ID_TRAY_SAFE_EJECT, t_eject.as_ptr());
+    AppendMenuW(h_menu, fl_lock, ID_TRAY_LOCK_NOW, t_lock.as_ptr());
+    AppendMenuW(h_menu, fl_eject, ID_TRAY_SAFE_EJECT, t_eject.as_ptr());
     AppendMenuW(h_menu, MF_SEPARATOR, 0, null());
     AppendMenuW(h_menu, MF_STRING, ID_TRAY_EXIT, t_exit.as_ptr());
 
@@ -5529,6 +5562,17 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
             col_hdr,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
+        if state.caps_lock_on {
+            let caps_col = if dark { rgb(251, 191, 36) } else { rgb(217, 119, 6) };
+            draw_text_rect(
+                hdc,
+                tr("⚠️ Caps Lock 켜짐", "⚠️ Caps Lock is ON", "⚠️ Caps Lock ON"),
+                RECT { left: sc(530, s), top: sc(337, s), right: rc_card1_right - sc(18, s), bottom: sc(361, s) },
+                state.font_small_bold,
+                caps_col,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
 
         draw_text_rect(
             hdc,
@@ -5572,6 +5616,17 @@ unsafe fn paint_main_canvas(hdc: HDC, rc_client: &RECT, state: &mut AppUiState) 
             col_hdr,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
+        if state.caps_lock_on {
+            let caps_col = if dark { rgb(251, 191, 36) } else { rgb(217, 119, 6) };
+            draw_text_rect(
+                hdc,
+                tr("⚠️ Caps Lock 켜짐", "⚠️ Caps Lock is ON", "⚠️ Caps Lock ON"),
+                RECT { left: sc(530, s), top: sc(147, s), right: rc_card_right - sc(18, s), bottom: sc(171, s) },
+                state.font_small_bold,
+                caps_col,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
 
         let cur_summary = format!("{}    |    {}", state.hint_str, state.retry_str);
         draw_text_rect(
@@ -6634,6 +6689,11 @@ unsafe extern "system" fn main_wnd_proc(hwnd: HWND, msg: UINT, w_param: WPARAM, 
                         state.focused_ctrl = cur_focus;
                         need_canvas_repaint = true;
                     }
+                    let caps = (GetKeyState(VK_CAPITAL) & 1) != 0;
+                    if caps != state.caps_lock_on {
+                        state.caps_lock_on = caps;
+                        need_canvas_repaint = true;
+                    }
 
                     if new_hover != state.hovered_ctrl {
                         let old = state.hovered_ctrl;
@@ -7345,6 +7405,13 @@ fn run_gui() {
         let scale = if dpi_x > 96 { (dpi_x as f32) / 96.0 } else { 1.0 };
 
         let cls_name = to_wide("SecureUSBManagerRustClassV3");
+        let existing_hwnd = FindWindowW(cls_name.as_ptr(), null());
+        if !existing_hwnd.is_null() {
+            ShowWindow(existing_hwnd, 5);
+            ShowWindow(existing_hwnd, 9);
+            SetForegroundWindow(existing_hwnd);
+            return;
+        }
         let br_card = CreateSolidBrush(rgb(255, 255, 255));
         let br_card_dark = CreateSolidBrush(rgb(45, 45, 45));
         let br_edit_dark = CreateSolidBrush(rgb(30, 30, 30));
@@ -7804,6 +7871,7 @@ fn run_gui() {
             idle_limit_minutes: saved_idle_mins,
             dark_mode: init_dark,
             show_pwd: false,
+            caps_lock_on: (GetKeyState(VK_CAPITAL) & 1) != 0,
             tray_active: false,
         };
 
